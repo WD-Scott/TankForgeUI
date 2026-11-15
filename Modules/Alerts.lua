@@ -14,7 +14,7 @@ ns.Alerts = Alerts
 
 local PRIORITY = { test = 9, healer = 5, death = 4, aggro = 3, lapse = 2, ready = 1 }
 
-local f = CreateFrame("Frame", "TankforgeUIAlert", UIParent)
+local f = CreateFrame("Frame", "TankForgeUIAlert", UIParent)
 f:SetSize(520, 62)
 f:SetFrameStrata("HIGH")
 f:Hide()

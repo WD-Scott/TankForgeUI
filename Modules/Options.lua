@@ -260,14 +260,14 @@ local function ApplyScale(v)
 end
 
 local function Build()
-    win = Style.Panel(UIParent, "TankforgeUIOptions")
+    win = Style.Panel(UIParent, "TankForgeUIOptions")
     win.bg:SetVertexColor(0.055, 0.06, 0.075, 0.98)
     win:SetFrameStrata("DIALOG")
     win:SetPoint("CENTER")
     win:EnableMouse(true)
     win:SetMovable(true)
     win:SetClampedToScreen(true)
-    table.insert(UISpecialFrames, "TankforgeUIOptions")
+    table.insert(UISpecialFrames, "TankForgeUIOptions")
 
     -- Title bar: drag the window by it.
     local titleBar = CreateFrame("Frame", nil, win)

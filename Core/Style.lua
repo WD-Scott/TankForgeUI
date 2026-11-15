@@ -257,7 +257,7 @@ end
 
 -- frame: the frame to move. default: { point, relativePoint, x, y } on UIParent.
 function Style.Movable(frame, key, label, default)
-    local anchor = CreateFrame("Frame", "TankforgeUIAnchor_" .. key, UIParent)
+    local anchor = CreateFrame("Frame", "TankForgeUIAnchor_" .. key, UIParent)
     anchor.key, anchor.label, anchor.default, anchor.target = key, label, default, frame
     anchor:SetSize(10, 10)
     anchor:SetClampedToScreen(true)
@@ -321,7 +321,7 @@ end
 local unlockBar, onLock
 local function UnlockBar()
     if unlockBar then return unlockBar end
-    local bar = Style.Panel(UIParent, "TankforgeUIUnlockBar")
+    local bar = Style.Panel(UIParent, "TankForgeUIUnlockBar")
     bar.bg:SetVertexColor(0.055, 0.06, 0.075, 0.97)
     bar:SetFrameStrata("FULLSCREEN_DIALOG")
     bar:SetSize(420, 74)

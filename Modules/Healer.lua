@@ -18,7 +18,7 @@ local PAD = 6
 local PORTRAIT = 54
 local LOW_MANA = 0.30
 
-local f = Style.Panel(UIParent, "TankforgeUIHealer")
+local f = Style.Panel(UIParent, "TankForgeUIHealer")
 f:SetSize(WIDTH, 66)
 f:Hide()
 Healer.frame = f
@@ -61,7 +61,7 @@ Style.Movable(f, "healer", "Healer", { "CENTER", "CENTER", 250, -30 })
 -- Clicking: an invisible secure button over the panel, so left-click targets
 -- the healer and right-click opens their menu, in combat too. Which unit it
 -- points at can only change out of combat; it hides itself when that unit is gone.
-local click = CreateFrame("Button", "TankforgeUIHealerButton", UIParent, "SecureUnitButtonTemplate")
+local click = CreateFrame("Button", "TankForgeUIHealerButton", UIParent, "SecureUnitButtonTemplate")
 click:SetAllPoints(f)
 click:SetFrameStrata(f:GetFrameStrata() or "MEDIUM")
 click:SetFrameLevel((f:GetFrameLevel() or 1) + 10)

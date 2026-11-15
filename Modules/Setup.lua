@@ -18,7 +18,7 @@ end
 -- A small prompt with one or two buttons.
 function TF:Prompt(text, okText, onOk, cancelText, onCancel)
     if not dialog then
-        dialog = Style.Panel(UIParent, "TankforgeUIPrompt")
+        dialog = Style.Panel(UIParent, "TankForgeUIPrompt")
         dialog:SetSize(380, 140)
         dialog:SetPoint("CENTER", 0, 120)
         dialog:SetFrameStrata("DIALOG")
@@ -57,7 +57,7 @@ end
 local copyBox
 local function ShowCopyBox(text)
     if not copyBox then
-        copyBox = Style.Panel(UIParent, "TankforgeUICopy")
+        copyBox = Style.Panel(UIParent, "TankForgeUICopy")
         copyBox:SetSize(460, 200)
         copyBox:SetPoint("CENTER", 0, 100)
         copyBox:SetFrameStrata("DIALOG")
@@ -67,7 +67,7 @@ local function ShowCopyBox(text)
         copyBox.text:SetPoint("TOPRIGHT", -14, -12)
         copyBox.text:SetWordWrap(true)
         copyBox.text:SetText("Press Ctrl+C to copy this layout. Then open Edit Mode, open the Layout dropdown, "
-            .. "choose Import, paste it and name it TankforgeUI.")
+            .. "choose Import, paste it and name it TankForgeUI.")
         local scroll = CreateFrame("ScrollFrame", nil, copyBox, "UIPanelScrollFrameTemplate")
         scroll:SetPoint("TOPLEFT", 14, -52)
         scroll:SetPoint("BOTTOMRIGHT", -34, 44)
@@ -111,6 +111,16 @@ local function InstallLayout()
     if mgr:IsShown() then return nil, "close Edit Mode first" end
 
     local existing = FindLayout(ns.LAYOUT_NAME)
+    if not existing and ns.LEGACY_LAYOUT_NAME then
+        -- Installed before 1.10 under the old spelling: adopt it, and rename it
+        -- if this client lets addons do that.
+        existing = FindLayout(ns.LEGACY_LAYOUT_NAME)
+        if existing and type(mgr.RenameLayout) == "function" then
+            local ok = pcall(mgr.RenameLayout, mgr, existing, ns.LAYOUT_NAME)
+            TF:Log("SETUP", "rename legacy layout: %s", tostring(ok))
+            existing = FindLayout(ns.LAYOUT_NAME) or FindLayout(ns.LEGACY_LAYOUT_NAME)
+        end
+    end
     if existing then
         if type(mgr.SelectLayout) ~= "function" then return nil, "can't switch layouts" end
         local ok = pcall(mgr.SelectLayout, mgr, existing)

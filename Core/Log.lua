@@ -22,7 +22,7 @@ local MAX_LINES = 20000
 local PROBE_PULLS = 3       -- probe the first few pulls of each session
 local SAMPLE_EVERY = 3      -- seconds between status samples in combat
 
-local store                 -- TankforgeUILog, account-wide
+local store                 -- TankForgeUILog, account-wide
 local sessionStart = 0
 local probesThisSession = 0
 
@@ -288,10 +288,12 @@ end)
 -- Setup ------------------------------------------------------------------------
 
 TF:On("LOGIN", function()
-    if type(TankforgeUILog) ~= "table" then TankforgeUILog = {} end
-    store = TankforgeUILog
+    if type(TankForgeUILog) ~= "table" then TankForgeUILog = {} end
+    TankforgeUILog = TankForgeUILog -- legacy name, see Adopt in Core.lua
+    store = TankForgeUILog
     store.lines = store.lines or {}
     sessionStart = API.Now()
+    for _, m in ipairs(TF.migrated or {}) do TF:Log("MIGRATE", "moved saved variables %s", m) end
     if store.enabled then
         -- After the other modules have built their state.
         C_Timer.After(1, Header)
@@ -305,7 +307,7 @@ local function ShowLines(count)
     local text = table.concat(lines, "\n", first, #lines)
     if not copyBox then
         local Style = ns.Style
-        copyBox = Style.Panel(UIParent, "TankforgeUILogBox")
+        copyBox = Style.Panel(UIParent, "TankForgeUILogBox")
         copyBox:SetSize(640, 400)
         copyBox:SetPoint("CENTER")
         copyBox:SetFrameStrata("DIALOG")

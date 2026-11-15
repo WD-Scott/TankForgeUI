@@ -33,7 +33,7 @@ local TICK = 0.2
 local C, HEX = Style.colors, Style.HEX
 local SetText = Style.SetText
 
-local f = Style.Panel(UIParent, "TankforgeUIThreat")
+local f = Style.Panel(UIParent, "TankForgeUIThreat")
 f:SetSize(WIDTH, 60)
 f:Hide()
 Threat.frame = f

@@ -88,7 +88,7 @@ end
 
 -- Window ---------------------------------------------------------------------
 
-local f = Style.Panel(UIParent, "TankforgeUIReport")
+local f = Style.Panel(UIParent, "TankForgeUIReport")
 f:SetSize(WIDTH, 200)
 f:SetFrameStrata("MEDIUM")
 f:EnableMouse(true)

@@ -15,7 +15,7 @@ local PAD = 6
 local ICON = 28
 local ICON_GAP = 4
 
-local f = Style.Panel(UIParent, "TankforgeUIHUD")
+local f = Style.Panel(UIParent, "TankForgeUIHUD")
 f:SetSize(WIDTH, 100)
 f:Hide()
 HUD.frame = f

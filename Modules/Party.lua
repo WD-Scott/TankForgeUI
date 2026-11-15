@@ -22,7 +22,7 @@ local W, H = 190, 40
 local GAP = 6
 local C = Style.colors
 
-local container = CreateFrame("Frame", "TankforgeUIParty", UIParent, "SecureHandlerStateTemplate")
+local container = CreateFrame("Frame", "TankForgeUIParty", UIParent, "SecureHandlerStateTemplate")
 container:SetSize(W, H * 4 + GAP * 3)
 Party.frame = container
 Party.buttons = {}
@@ -50,7 +50,7 @@ end
 
 local function MakeButton(i)
     local unit = "party" .. i
-    local b = CreateFrame("Button", "TankforgeUIParty" .. i, container, "SecureUnitButtonTemplate")
+    local b = CreateFrame("Button", "TankForgeUIParty" .. i, container, "SecureUnitButtonTemplate")
     b:SetSize(W, H)
     b:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -(i - 1) * (H + GAP))
     b.unit = unit
