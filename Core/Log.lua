@@ -289,11 +289,9 @@ end)
 
 TF:On("LOGIN", function()
     if type(TankForgeUILog) ~= "table" then TankForgeUILog = {} end
-    TankforgeUILog = TankForgeUILog -- legacy name, see Adopt in Core.lua
     store = TankForgeUILog
     store.lines = store.lines or {}
     sessionStart = API.Now()
-    for _, m in ipairs(TF.migrated or {}) do TF:Log("MIGRATE", "moved saved variables %s", m) end
     if store.enabled then
         -- After the other modules have built their state.
         C_Timer.After(1, Header)

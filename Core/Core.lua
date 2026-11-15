@@ -174,26 +174,9 @@ end)
 
 -- Loading --------------------------------------------------------------------
 
--- Before 1.10 the saved variables were TankforgeUIDB / TankforgeUILog. Take the
--- old table if the new one is empty, then point the old name at the same table
--- rather than clearing it: if the client still has the old .toc cached (a
--- /reload instead of a restart), the old name is the only one it saves, and
--- clearing it would lose everything. Remove with the legacy .toc names.
-TF.migrated = {}
-local function Adopt(new, old)
-    if type(_G[new]) ~= "table" and type(_G[old]) == "table" then
-        _G[new] = _G[old]
-        TF.migrated[#TF.migrated + 1] = old .. " -> " .. new
-    end
-    if type(_G[new]) == "table" then _G[old] = _G[new] end
-end
-
 TF:RegisterEvent("ADDON_LOADED", function(_, name)
     if name ~= addonName then return end
-    Adopt("TankForgeUIDB", "TankforgeUIDB")
-    Adopt("TankForgeUILog", "TankforgeUILog")
     if type(TankForgeUIDB) ~= "table" then TankForgeUIDB = {} end
-    TankforgeUIDB = TankForgeUIDB
     Merge(TankForgeUIDB, ns.defaults)
     TF.db = TankForgeUIDB
     TF:Fire("LOADED")

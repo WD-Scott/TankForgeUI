@@ -19,12 +19,5 @@ A WoW: Forever add-on (Lua, no build step). The .toc targets `## Interface: 1600
 ## Naming rule
 Everything is spelled **TankForgeUI**: SavedVariables `TankForgeUIDB` / `TankForgeUILog`, the
 global `_G.TankForgeUI`, frame names, and the Edit Mode layout (`ns.LAYOUT_NAME`).
-
-The pre-1.10 spelling `TankforgeUI` survives only for migration:
-- the legacy names declared in the .toc `## SavedVariables` lines
-- `Adopt()` in `Core/Core.lua` and the alias line in `Core/Log.lua` (the old name is aliased to
-  the same table, never cleared, so a stale cached .toc can't lose data)
-- `ns.LEGACY_LAYOUT_NAME` in `Data/Layout.lua`, used by `/tf setup`
-
-Remove all of those together in a later version (e.g. 2.0), once every character has logged in on 1.10+.
+Renaming a SavedVariables global drops existing data unless you add a migration.
 Changing `## SavedVariables` lines needs a full client restart, not `/reload`.

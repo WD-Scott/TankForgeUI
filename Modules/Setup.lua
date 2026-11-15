@@ -111,16 +111,6 @@ local function InstallLayout()
     if mgr:IsShown() then return nil, "close Edit Mode first" end
 
     local existing = FindLayout(ns.LAYOUT_NAME)
-    if not existing and ns.LEGACY_LAYOUT_NAME then
-        -- Installed before 1.10 under the old spelling: adopt it, and rename it
-        -- if this client lets addons do that.
-        existing = FindLayout(ns.LEGACY_LAYOUT_NAME)
-        if existing and type(mgr.RenameLayout) == "function" then
-            local ok = pcall(mgr.RenameLayout, mgr, existing, ns.LAYOUT_NAME)
-            TF:Log("SETUP", "rename legacy layout: %s", tostring(ok))
-            existing = FindLayout(ns.LAYOUT_NAME) or FindLayout(ns.LEGACY_LAYOUT_NAME)
-        end
-    end
     if existing then
         if type(mgr.SelectLayout) ~= "function" then return nil, "can't switch layouts" end
         local ok = pcall(mgr.SelectLayout, mgr, existing)
