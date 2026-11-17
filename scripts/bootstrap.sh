@@ -11,7 +11,8 @@ if [ ! -x "$TREE/bin/lua" ]; then
     if ! python3 -c "import hererocks" 2>/dev/null; then
         python3 -m pip install --user --quiet hererocks
     fi
-    python3 -m hererocks "$TREE" -l5.1 -rlatest
+    # No readline: the tests need no REPL, and CI images lack its headers.
+    python3 -m hererocks "$TREE" -l5.1 -r3.8.0 --no-readline
 fi
 
 for rock in busted luacheck luacov; do
