@@ -51,6 +51,9 @@ ns.defaults = {
     -- Need / Greed / Pass windows wait for combat to end, unless a roll has revealAt seconds left.
     loot = { delay = true, revealAt = 10 },
     report = { enabled = true, autoShow = true, openWorld = false, hideAfter = 25, charts = true },
+    -- Options window: which collapsible sections are folded away. Heavy ones
+    -- start collapsed; sections absent from the table read as expanded.
+    options = { collapsed = { Hide = true, Alerts = true, Frames = true } },
     -- Whole dungeon / raid runs: recorded only when enabled. keep: runs saved.
     runs = { enabled = false, toast = true, keep = 25 },
 

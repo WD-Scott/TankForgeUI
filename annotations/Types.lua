@@ -54,6 +54,7 @@
 ---@field loot {delay: boolean, revealAt: number}
 ---@field report {enabled: boolean, autoShow: boolean, openWorld: boolean, hideAfter: number, charts: boolean}
 ---@field runs {enabled: boolean, toast: boolean, keep: integer}
+---@field options {collapsed: table<string, boolean>} folded /tf sections, keyed by section id
 ---@field positions table<string, {[1]: string, [2]: string, [3]: number, [4]: number}>
 ---@field history PullRecord[] newest first, at most 30
 ---@field runHistory RunRecord[] newest first
