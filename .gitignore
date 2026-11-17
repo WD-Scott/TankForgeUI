@@ -1,41 +1,36 @@
-# Compiled Lua sources
-luac.out
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.Spotlight-V100
+.Trashes
+Icon?
 
-# luarocks build files
-*.src.rock
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+*.sublime-*
+
+# AI assistant (local only)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
+# Build / release output
 *.zip
-*.tar.gz
+luac.out
+.release/
 
-# Object files
-*.o
-*.os
-*.ko
-*.obj
-*.elf
+# Lua tooling
+.luacheckcache
+luacov.*.out
 
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-*.def
-*.exp
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
-
+# Test toolchain (scripts/bootstrap.sh)
+.lua/
+luacov.report.out

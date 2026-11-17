@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Cache Lua toolchain
+        uses: actions/cache@v5
+        with:
+          path: .lua
+          key: lua51-ubuntu-24.04-${{ hashFiles('scripts/bootstrap.sh') }}
+
+      - name: Install Lua 5.1, busted, luacheck, luacov
+        run: scripts/bootstrap.sh
+
+      - name: Lint and test
+        run: scripts/test.sh --coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage
+          path: luacov.report.out
+          if-no-files-found: ignore

@@ -1,0 +1,5 @@
+return {
+    include = { "^Core/", "^Data/", "^Modules/" },
+    exclude = { "^spec/", "^%.lua/" },
+    reportfile = "luacov.report.out",
+}

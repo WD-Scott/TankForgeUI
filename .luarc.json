@@ -1,0 +1,11 @@
+{
+    "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+    "runtime.version": "Lua 5.1",
+    "workspace.ignoreDir": [".lua", "spec"],
+    "workspace.library": [],
+    "diagnostics.globals": [
+        "TankForgeUI", "TankForgeUIDB", "TankForgeUILog",
+        "SLASH_TANKFORGEUI1", "SLASH_TANKFORGEUI2"
+    ],
+    "diagnostics.disable": ["undefined-global"]
+}

@@ -1,0 +1,14 @@
+# What ships in the add-on. Read by the BigWigs packager (CurseForge, Wago,
+# WoWInterface) and by scripts/sync.sh. Dotfiles are always left out.
+package-as: TankForgeUI
+
+ignore:
+  - scripts
+  - spec
+  - annotations
+  - .github
+  - CLAUDE.md
+  - CLAUDE.local.md
+  - .claude
+  - "*.zip"
+  - "luacov.*"
