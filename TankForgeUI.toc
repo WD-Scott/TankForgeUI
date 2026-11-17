@@ -1,7 +1,7 @@
 ## Interface: 16001, 16002
 ## Title: TankForgeUI
 ## Notes: A tank's UI for WoW: Forever: tank HUD, threat and loose mobs, healer panel, party frames, alerts and pull reports. /tf
-## Version: 1.10.1
+## Version: 1.11.2
 ## SavedVariables: TankForgeUILog
 ## SavedVariablesPerCharacter: TankForgeUIDB
 
@@ -12,6 +12,10 @@ Core\Log.lua
 Data\Kits.lua
 Data\Layout.lua
 Modules\Hide.lua
+Modules\Loot.lua
+Modules\Placement.lua
+Modules\Professions.lua
+Modules\Stances.lua
 Modules\Setup.lua
 Modules\Tank.lua
 Modules\HUD.lua
@@ -19,5 +23,7 @@ Modules\Threat.lua
 Modules\Healer.lua
 Modules\Party.lua
 Modules\Alerts.lua
+Modules\Charts.lua
 Modules\Report.lua
+Modules\Runs.lua
 Modules\Options.lua

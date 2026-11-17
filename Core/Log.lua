@@ -2,7 +2,9 @@
 -- Debug log: /tf log on, play, then /reload or log out. The game writes the log to
 --   WTF\Account\<ACCOUNT>\SavedVariables\TankForgeUI.lua
 -- (addons can't write files themselves; saved variables are written on reload,
--- logout and quit). Send that file to get the run looked at.
+-- logout and quit). Attach that file to a bug report. Lines are kept across
+-- logins and reloads (each session starts with a "==== session" header) until
+-- /tf log clear, trimmed to the newest Log.MAX_LINES.
 --
 -- What it records: a session header (version, client, class, spells, settings,
 -- group), tank/healer changes, casts, hits, pulls, loose mobs, alerts, deaths
@@ -18,7 +20,7 @@ local API = ns.API
 local Log = {}
 ns.Log = Log
 
-local MAX_LINES = 20000
+Log.MAX_LINES = 5000        -- trimmed to half when exceeded
 local PROBE_PULLS = 3       -- probe the first few pulls of each session
 local SAMPLE_EVERY = 3      -- seconds between status samples in combat
 
@@ -26,11 +28,16 @@ local store                 -- TankForgeUILog, account-wide
 local sessionStart = 0
 local probesThisSession = 0
 
+--- True while the debug log is recording.
+---@return boolean
 function Log:IsOn()
     return store ~= nil and store.enabled == true
 end
 
--- A value as text: its type and value, or "secret".
+--- A value as text for the log: numbers to 6 digits, strings quoted and cut
+--- to 48 characters, other types by name, and "secret" for secret values.
+---@param v any
+---@return string
 local function D(v)
     if API.IsSecret(v) then return "secret" end
     local t = type(v)
@@ -55,20 +62,24 @@ local function Call(fn, ...)
     return table.concat(out, ", ")
 end
 
+-- Append a line; past Log.MAX_LINES, keep the newest half behind a marker line.
 local function Add(line)
     local lines = store.lines
     lines[#lines + 1] = line
-    if #lines > MAX_LINES then
+    if #lines > Log.MAX_LINES then
         -- Drop the oldest half in one go, so trimming stays cheap on average.
-        local keep = math.floor(MAX_LINES / 2)
+        local keep = math.floor(Log.MAX_LINES / 2)
         local from = #lines - keep
-        for i = 1, keep do lines[i] = lines[from + i] end
-        for i = #lines, keep + 1, -1 do lines[i] = nil end
         lines[1] = "... older lines dropped ..."
+        for i = 1, keep do lines[i + 1] = lines[from + i] end
+        for i = #lines, keep + 2, -1 do lines[i] = nil end
     end
 end
 
--- TF:Log("CAST", "%s (%d)", name, id)
+--- Write a line to the debug log, when it's on: TF:Log("CAST", "%s (%d)", name, id).
+--- A format error writes the format string instead of raising.
+---@param category string short tag, padded to 6 characters
+---@param fmt string string.format pattern
 function TF:Log(category, fmt, ...)
     if not (store and store.enabled) then return end
     local ok, text = pcall(string.format, fmt or "", ...)
@@ -115,6 +126,8 @@ local function Header()
     Log:Group("session start")
 end
 
+--- Log the zone, group and healer, and each party member's name, class and role.
+---@param why string
 function Log:Group(why)
     if not self:IsOn() then return end
     local _, instanceType = IsInInstance()
@@ -134,6 +147,8 @@ end
 
 -- Probe: which values can an addon read, here and now? ---------------------------
 
+--- Write which game values are readable (plain) or secret right now.
+---@param context string why the probe ran
 function Log:Probe(context)
     if not self:IsOn() then return end
     TF:Log("PROBE", "---- %s (in combat %s)", context, tostring(InCombatLockdown()))
@@ -142,7 +157,7 @@ function Log:Probe(context)
         Call(UnitPowerMax, "player", 1), Call(GetShapeshiftFormID), Call(UnitGroupRolesAssigned, "player"))
     TF:Log("PROBE", "Shield Block aura by ID %s; cooldown %s", Call(C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID, 2565),
         (function()
-            local ok, info = pcall(C_Spell.GetSpellCooldown, 2565)
+            local ok, info = pcall(C_Spell and C_Spell.GetSpellCooldown, 2565)
             if not ok then return "error" end
             if API.IsSecret(info) then return "secret table" end
             if type(info) ~= "table" then return D(info) end
@@ -159,15 +174,31 @@ function Log:Probe(context)
     local UA = C_UnitAuras
     TF:Log("PROBE", "Shield Block aura by name %s", Call(UA and UA.GetAuraDataBySpellName, "player",
         API.GetSpellName(2565) or "Shield Block", "HELPFUL"))
-    local buffs = {}
-    for i = 1, 16 do
-        local ok, a = pcall(UA.GetAuraDataByIndex, "player", i, "HELPFUL")
-        if not ok then buffs[#buffs + 1] = "error" break end
-        if API.IsSecret(a) then buffs[#buffs + 1] = "secret" break end
-        if a == nil then break end
-        buffs[#buffs + 1] = D(a.name) .. " " .. D(a.spellId)
+    -- Three ways to list buffs; which work in combat on this client varies, so
+    -- each one's result (or its error message) is logged.
+    local function ScanBuffs(fn)
+        if type(fn) ~= "function" then return "missing" end
+        local out = {}
+        for i = 1, 16 do
+            local ok, a = pcall(fn, "player", i, "HELPFUL")
+            if not ok then
+                out[#out + 1] = "error at " .. i .. ": " .. tostring(a):sub(1, 80)
+                break
+            end
+            if API.IsSecret(a) then out[#out + 1] = "secret" break end
+            if a == nil then break end
+            if type(a) == "table" then
+                local okRead, text = pcall(function() return D(a.name) .. " " .. D(a.spellId) end)
+                out[#out + 1] = okRead and text or "unreadable"
+            else
+                out[#out + 1] = D(a)
+            end
+        end
+        return #out > 0 and table.concat(out, "; ") or "none"
     end
-    TF:Log("PROBE", "buffs: %s", #buffs > 0 and table.concat(buffs, "; ") or "none")
+    TF:Log("PROBE", "buffs by GetAuraDataByIndex: %s", ScanBuffs(UA and UA.GetAuraDataByIndex))
+    TF:Log("PROBE", "buffs by GetBuffDataByIndex: %s", ScanBuffs(UA and UA.GetBuffDataByIndex))
+    TF:Log("PROBE", "buffs by UnitBuff: %s", ScanBuffs(_G.UnitBuff))
     local getCVar = (C_CVar and C_CVar.GetCVar) or GetCVar
     TF:Log("PROBE", "nameplateShowEnemies %s, nameplates seen %d, my threat status %s",
         Call(getCVar, "nameplateShowEnemies"), ns.Threat and ns.Threat.PlateCount and ns.Threat.PlateCount() or -1,
@@ -207,10 +238,10 @@ sampler:SetScript("OnUpdate", function(_, dt)
     local primary = Tank and Tank.primary
     TF:Log("SAMPLE", "being hit %s, %s up %.1fs ready %s, loose %d, healer attacked %s, healer tag %s, "
         .. "alpha healer %.2f party %.2f, pull hits %s covered %.1f/%.1fs",
-        tostring(Tank:BeingHit()), tostring(primary and API.GetSpellName(primary.spell)),
+        tostring(Tank and Tank:BeingHit()), tostring(primary and API.GetSpellName(primary.spell)),
         primary and Tank:Remaining(primary) or 0, tostring(primary and Tank:IsReady(primary)),
         Threat and Threat.looseCount or 0, tostring(Threat and Threat.healerAttacked),
-        tostring(Healer and Healer.frame.tag:GetText()), Healer and Healer.frame:GetAlpha() or 0,
+        tostring(Healer and Healer.frame.tag and Healer.frame.tag:GetText()), Healer and Healer.frame:GetAlpha() or 0,
         ns.Party and ns.Party.frame:GetAlpha() or 0,
         tostring(p and p.hits), p and p.covered or 0, p and p.underAttack or 0)
 end)
@@ -252,9 +283,9 @@ TF:On("HIT", function(kind, physical, secretKind)
         tostring(Tank.primary and Tank:IsActive(Tank.primary)))
 end)
 
-TF:On("LOOSE", function(mob, victim, onHealer, wasOnMe)
-    TF:Log("LOOSE", "%s -> %s (healer %s, was on me %s)", tostring(mob or "a mob"), tostring(victim), tostring(onHealer),
-        tostring(wasOnMe))
+TF:On("LOOSE", function(mob, victim, onHealer, wasOnMe, _, counted)
+    TF:Log("LOOSE", "%s -> %s (healer %s, was on me %s, counted %s)", tostring(mob or "a mob"), tostring(victim),
+        tostring(onHealer), tostring(wasOnMe), tostring(counted))
 end)
 
 TF:On("PULL_START", function(p)
@@ -285,14 +316,61 @@ TF:On("ENTERING_WORLD", function()
     if Log:IsOn() then Log:Group("entered world") end
 end)
 
+-- The game blocked a protected call because TankForgeUI's code was in the
+-- call chain (taint). Record which call, and say so once per session.
+--
+-- One taint can block the same calls every second of a fight (StanceButton1
+-- through 10, over and over), which once filled most of the log. So each kind
+-- of call (numbers in frame names ignored) is written the first time it's seen
+-- in a fight, and repeats are counted and written as one line when the fight
+-- ends (or at logout).
+local blockWarned = false
+local blockRepeats = {}     -- kind -> repeats not yet written
+local blockOrder = {}       -- kinds in the order first seen
+
+local function FlushBlocks()
+    for _, kind in ipairs(blockOrder) do
+        local n = blockRepeats[kind]
+        if n and n > 0 then TF:Log("BLOCK", "%s: repeated %d more times", kind, n) end
+    end
+    wipe(blockRepeats)
+    wipe(blockOrder)
+end
+
+local function OnBlocked(event, addon, func)
+    if addon ~= addonName then return end
+    local kind = tostring(event) .. ": " .. tostring(func):gsub("%d+", "N")
+    if blockRepeats[kind] then
+        blockRepeats[kind] = blockRepeats[kind] + 1
+    else
+        blockRepeats[kind] = 0
+        blockOrder[#blockOrder + 1] = kind
+        TF:Log("BLOCK", "%s: %s", tostring(event), tostring(func))
+    end
+    if blockWarned then return end
+    blockWarned = true
+    TF:Print("the game blocked " .. tostring(func) .. " from TankForgeUI. To track it down: |cff" .. TF.COLOR
+        .. "/tf log on|r, /reload, do the same thing again, then attach the log file to a bug report. |cff"
+        .. TF.COLOR .. "/tf taint|r shows what's affected.")
+end
+TF:RegisterEvent("ADDON_ACTION_BLOCKED", OnBlocked)
+TF:RegisterEvent("ADDON_ACTION_FORBIDDEN", OnBlocked)
+-- A fight's repeats are written when it ends; ones from outside a fight when the next starts.
+TF:On("COMBAT", FlushBlocks)
+TF:RegisterEvent("PLAYER_LOGOUT", FlushBlocks)
+
 -- Setup ------------------------------------------------------------------------
 
 TF:On("LOGIN", function()
     if type(TankForgeUILog) ~= "table" then TankForgeUILog = {} end
     store = TankForgeUILog
-    store.lines = store.lines or {}
+    -- Keep earlier sessions: a /reload after a run must not lose the run's lines.
+    -- Add() trims to Log.MAX_LINES; /tf log clear empties it.
+    if type(store.lines) ~= "table" then store.lines = {} end
     sessionStart = API.Now()
     if store.enabled then
+        TF:Print(string.format("debug log is recording (%d lines). |cff%s/tf log off|r to stop.",
+            #store.lines, TF.COLOR))
         -- After the other modules have built their state.
         C_Timer.After(1, Header)
     end
@@ -333,6 +411,8 @@ local function ShowLines(count)
     copyBox.edit:HighlightText()
 end
 
+--- Turn recording on (writes a fresh session header) or off. Needs PLAYER_LOGIN first.
+---@param on boolean
 function Log:SetEnabled(on)
     if not store then return end
     store.enabled = on and true or false
@@ -340,11 +420,13 @@ function Log:SetEnabled(on)
         sessionStart = API.Now()
         probesThisSession = 0
         Header()
-        TF:Print("debug log |cff40ff40on|r. Play as usual, then /reload or log out to write it to "
-            .. "WTF\\Account\\<account>\\SavedVariables\\TankForgeUI.lua and send me that file.")
+        TF:Print("debug log |cff40ff40on|r. Play as usual. It's saved when you /reload or log out, to "
+            .. "WTF\\Account\\<account>\\SavedVariables\\TankForgeUI.lua. Read it in game with |cff"
+            .. TF.COLOR .. "/tf log show|r, or attach that file to a bug report.")
     else
         TF:Log("SESS", "log turned off")
-        TF:Print("debug log |cffff4040off|r. " .. #store.lines .. " lines kept; /tf log clear to empty it.")
+        TF:Print("debug log |cffff4040off|r. " .. #store.lines .. " lines kept until |cff" .. TF.COLOR
+            .. "/tf log clear|r.")
     end
     sampler:SetShown(on and InCombatLockdown() and true or false)
 end
@@ -374,4 +456,83 @@ TF:AddCommand("log", function(args)
         TF:Print(string.format("debug log is %s, %d lines. /tf log on | off | mark <note> | probe | show [lines] | clear",
             store.enabled and "on" or "off", #store.lines))
     end
-end, "on|off|mark <note>|probe|show|clear - debug log you can send me")
+end, "on|off|mark|probe|show|clear - debug log to send for a bug report", { group = "Debugging", details = {
+    "on - start recording (written to disk on /reload or logout; kept across reloads)",
+    "off - stop recording; what's there is kept until /tf log clear",
+    "mark <note> - add a note to the log, e.g. right before something goes wrong",
+    "probe - write which game values are readable right now",
+    "show [lines] - open the last 400 (or [lines]) lines in a box you can copy",
+    "clear - empty the log",
+    "(no argument) - say whether it's on and how many lines it has",
+} })
+
+-- Taint check ------------------------------------------------------------------
+--
+-- Blizzard frames whose fields have been written by addon code. When Blizzard's
+-- own code later reads one of those in combat, its protected calls are blocked
+-- and the game blames whichever addon wrote it. Run out of combat; anything
+-- listed under TankForgeUI is ours to fix. /console taintLog 2 has the full story.
+
+local TAINT_FRAMES = {
+    "StanceBar", "StanceBarFrame", "MainActionBar", "MainMenuBar", "MultiBarBottomLeft",
+    "MultiBarBottomRight", "ObjectiveTrackerFrame", "EditModeManagerFrame",
+    "PlayerSpellsFrame", "SpellBookFrame", "PlayerFrame", "PartyFrame", "CompactPartyFrame",
+}
+for i = 1, 10 do TAINT_FRAMES[#TAINT_FRAMES + 1] = "StanceButton" .. i end
+for i = 1, 12 do TAINT_FRAMES[#TAINT_FRAMES + 1] = "ActionButton" .. i end
+
+local function TaintScan()
+    if type(issecurevariable) ~= "function" then
+        TF:Print("this client can't check taint from inside the game. /console taintLog 2 makes the game "
+            .. "write Logs\\taint.log instead.")
+        return
+    end
+    local frames, keys, ours = 0, 0, 0
+    for _, name in ipairs(TAINT_FRAMES) do
+        local t = _G[name]
+        if type(t) == "table" then
+            frames = frames + 1
+            local bad = {}
+            local okG, secureG, byG = pcall(issecurevariable, name)
+            if okG and not secureG then bad[#bad + 1] = "(the global itself, " .. tostring(byG) .. ")" end
+            for k in pairs(t) do
+                local ok, secure, by = pcall(issecurevariable, t, k)
+                if ok and not secure then
+                    keys = keys + 1
+                    if by == addonName then ours = ours + 1 end
+                    bad[#bad + 1] = tostring(k) .. " (" .. tostring(by) .. ")"
+                end
+            end
+            if #bad > 0 then
+                table.sort(bad)
+                local line = table.concat(bad, ", ", 1, math.min(#bad, 12))
+                if #bad > 12 then line = line .. string.format(", +%d more", #bad - 12) end
+                TF:Print(name .. ": " .. line)
+                TF:Log("TAINT", "%s: %s", name, table.concat(bad, ", "))
+            end
+        end
+    end
+    local summary = string.format("taint check: %d frames, %d tainted fields, %d by %s%s.",
+        frames, keys, ours, addonName, InCombatLockdown() and " (in combat)" or "")
+    TF:Print(summary)
+    TF:Log("TAINT", "%s", summary)
+end
+
+-- How much CPU TankForgeUI uses, from the client's own add-on profiler. Peak is
+-- one worst frame (usually login or /reload); the averages are what matter.
+TF:AddCommand("perf", function()
+    local m = API.AddOnMetrics(addonName)
+    if not m then
+        TF:Print("this client has no add-on profiler.")
+        return
+    end
+    local function ms(key) return m[key] and string.format("%.3fms", m[key]) or "?" end
+    local function n(key) return m[key] and tostring(m[key]) or "?" end
+    TF:Print(string.format("CPU per frame: recent %s, session %s, encounter %s, peak %s.",
+        ms("RecentAverageTime"), ms("SessionAverageTime"), ms("EncounterAverageTime"), ms("PeakTime")))
+    TF:Print(string.format("Frames over 5ms: %s, over 10ms: %s, over 50ms: %s.",
+        n("CountTimeOver5Ms"), n("CountTimeOver10Ms"), n("CountTimeOver50Ms")))
+end, "- CPU use from the game's add-on profiler (averages per frame, and the worst frame)", { group = "Debugging" })
+
+TF:AddCommand("taint", TaintScan, "- list Blizzard frame fields tainted by add-ons (should be none by TankForgeUI)",
+    { group = "Debugging" })

@@ -16,17 +16,30 @@ ns.Tank = Tank
 local GRACE = 10        -- seconds out of stance, out of combat, before you stop counting as the tank
 local HIT_WINDOW = 2.5  -- seconds after a hit during which you count as being hit
 local TICK = 0.25
+local TIMELINE_MAX = 900 -- seconds of per-second timeline kept per pull (Charts.MAX_SECONDS)
 
 Tank.isTank = false
-Tank.entries = {}       -- every tracked spell: { def, spell, known, ids }
+---@type TankEntry[]
+Tank.entries = {}       -- every tracked spell
+---@type TankEntry[]
 Tank.am = {}            -- active mitigation entries, primary first
+---@type TankEntry[]
 Tank.icons = {}         -- HUD icon entries that are known
+---@type TankEntry|nil
+Tank.primary = nil      -- the mitigation you're judged on
+---@type Pull|nil
+Tank.pull = nil         -- the pull being recorded
 Tank.lastHit = 0
 Tank.lastRelevantHit = 0
+---@type string|nil
+Tank.encounter = nil    -- the boss encounter in progress (ENCOUNTER_START to ENCOUNTER_END)
 
 local byId = {}
 local state = {}        -- [def] = { readyAt, lastCast, expiry } (survives rebuilds)
 
+--- The modelled timers for an entry (shared by every rank, kept across rebuilds).
+---@param entry TankEntry
+---@return {readyAt: number, lastCast: number|nil, expiry: number, blocksLeft: number|nil}
 local function St(entry)
     local s = state[entry.def]
     if not s then
@@ -39,12 +52,14 @@ Tank.State = St
 
 -- Kit ------------------------------------------------------------------------
 
+--- Every rank of a kit spell, lowest first.
 local function Ranks(def)
     local list = { def.spell }
     for _, id in ipairs(def.alt or {}) do list[#list + 1] = id end
     return list
 end
 
+--- Rebuild the tracked spells from the player's class kit and known ranks. Fires KIT_CHANGED.
 function Tank:Build()
     local class = API.UnitClass("player")
     self.class = class
@@ -87,33 +102,52 @@ function Tank:Build()
     TF:Fire("KIT_CHANGED")
 end
 
+--- The tracked entry for any rank (or buff) spell ID.
+---@param spellID number
+---@return TankEntry|nil
 function Tank:EntryFor(spellID) return byId[spellID] end
 
 -- Readiness and mitigation ----------------------------------------------------
 
+--- True when a known spell is off its modelled cooldown (50ms slack).
+---@param entry TankEntry|nil
+---@param now number|nil defaults to API.Now()
+---@return boolean
 function Tank:IsReady(entry, now)
     if not entry or not entry.known then return false end
     now = now or API.Now()
     return now >= (St(entry).readyAt or 0) - 0.05
 end
 
--- Seconds until ready, 0 when ready.
+--- Seconds until ready, 0 when ready.
+---@param entry TankEntry
+---@param now number|nil
+---@return number
 function Tank:CooldownLeft(entry, now)
     now = now or API.Now()
     return math.max((St(entry).readyAt or 0) - now, 0)
 end
 
+--- True while a mitigation's modelled buff is up.
+---@param entry TankEntry|nil
+---@param now number|nil
+---@return boolean
 function Tank:IsActive(entry, now)
     if not entry then return false end
     return (St(entry).expiry or 0) > (now or API.Now())
 end
 
+--- Seconds left on a mitigation's modelled buff, 0 when down.
+---@param entry TankEntry|nil
+---@param now number|nil
+---@return number
 function Tank:Remaining(entry, now)
     if not entry then return 0 end
     return math.max((St(entry).expiry or 0) - (now or API.Now()), 0)
 end
 
--- Correct the cast model from the real cooldowns whenever they are readable.
+--- Correct the cast model from the real cooldowns whenever they are readable.
+--- Readable cooldowns of 1.6s or less are taken as the global cooldown and ignored.
 function Tank:Calibrate()
     for _, entry in ipairs(self.entries) do
         if entry.known and entry.def.cd then
@@ -129,7 +163,9 @@ function Tank:Calibrate()
     end
 end
 
--- Correct mitigation timers from the real buffs whenever they are readable.
+--- Correct mitigation timers from the real buffs whenever they are readable.
+--- An aura that is gone out of combat (and not hidden) ends the modelled buff;
+--- in combat a missing aura proves nothing, so the model is kept.
 function Tank:SyncAuras()
     local now = API.Now()
     for _, entry in ipairs(self.am) do
@@ -150,24 +186,50 @@ end
 -- Tanking or not ---------------------------------------------------------------
 
 local function Contains(list, v)
-    if v == nil then return false end
-    for _, x in ipairs(list or {}) do
+    if v == nil or not list then return false end
+    for _, x in ipairs(list) do
         if x == v then return true end
     end
     return false
 end
 
+--- True in a kit posture: a tanking form, form spell or aura (Righteous Fury).
+---@return boolean
 function Tank:InPosture()
     local p = self.kit and self.kit.posture
     if not p then return false end
     if Contains(p.forms, API.GetShapeshiftFormID()) then return true end
     if Contains(p.formSpells, API.GetActiveFormSpellID()) then return true end
-    for _, id in ipairs(p.auras or {}) do
-        if API.GetPlayerAura(id) then return true end
+    if p.auras then
+        for _, id in ipairs(p.auras) do
+            if API.GetPlayerAura(id) then return true end
+        end
     end
     return false
 end
 
+--- True when a known spell's stance/form and shield needs are met right now
+--- (Shield Block in Defensive Stance with a shield), cooldown aside.
+---@param entry TankEntry|nil
+---@return boolean
+function Tank:Usable(entry)
+    if not entry or not entry.known then return false end
+    local def = entry.def
+    if def.forms and not Contains(def.forms, API.GetShapeshiftFormID()) then return false end
+    if def.shield and not API.HasShield() then return false end
+    return true
+end
+
+--- True when you could press it now: usable and off its modelled cooldown.
+---@param entry TankEntry|nil
+---@param now number|nil
+---@return boolean
+function Tank:CanUse(entry, now)
+    return self:Usable(entry) and self:IsReady(entry, now)
+end
+
+--- Why you count as the tank: "always" (setting), "role", "stance", or nil.
+---@return string|nil
 function Tank:Reason()
     if not self.kit then return nil end
     if TF.db.tankMode == "always" then return "always" end
@@ -177,12 +239,15 @@ function Tank:Reason()
 end
 
 local lossSince, graceTimer
+-- Set Tank.isTank, firing TANK_CHANGED only on a change.
 local function SetTank(on)
     if Tank.isTank == on then return end
     Tank.isTank = on
     TF:Fire("TANK_CHANGED", on)
 end
 
+--- Decide whether you're tanking. Gaining a reason counts at once; losing it
+--- counts only after GRACE seconds out of combat and outside a pull.
 function Tank:Evaluate()
     if self:Reason() then
         lossSince = nil
@@ -214,6 +279,9 @@ end
 
 -- Casts and hits -------------------------------------------------------------
 
+--- Update the cast model for one of your casts: cooldown, buff expiry (stacking
+--- up to maxDuration), block charges, and the pull's cast counts. Fires CAST.
+---@param spellID number
 function Tank:OnCast(spellID)
     local entry = byId[spellID]
     if not entry then return end
@@ -243,7 +311,11 @@ end
 local HIT_KINDS = { WOUND = true, BLOCK = true, DODGE = true, PARRY = true, ABSORB = true,
     MISS = true, RESIST = true, IMMUNE = true, DEFLECT = true, EVADE = true }
 
-function Tank:OnHit(kind, physical)
+--- Record a hit on you. Hits of the wrong school for a physical-only
+--- mitigation don't count against it.
+---@param _kind string combat-log kind (WOUND, BLOCK, ... or "hit" when secret)
+---@param physical boolean|nil nil when the school is unreadable
+function Tank:OnHit(_kind, physical)
     local now = API.Now()
     self.lastHit = now
     local primary = self.primary
@@ -252,6 +324,8 @@ function Tank:OnHit(kind, physical)
     local p = self.pull
     if not p then return end
     p.hits = p.hits + 1
+    local sec = math.floor(now - p.start) + 1
+    if sec <= TIMELINE_MAX then p.tl.hit[sec] = (p.tl.hit[sec] or 0) + 1 end
     if relevant then
         p.hitsRelevant = p.hitsRelevant + 1
         if primary and primary.known and not self:IsActive(primary, now) then
@@ -260,9 +334,9 @@ function Tank:OnHit(kind, physical)
     end
 end
 
--- A full block uses up a charge of a block-limited mitigation (Shield Block's
--- two). Partial blocks arrive as ordinary hits and can't be counted, so this
--- can only end the buff early, never late.
+--- A full block uses up a charge of a block-limited mitigation (Shield Block's
+--- two). Partial blocks arrive as ordinary hits and can't be counted, so this
+--- can only end the buff early, never late.
 function Tank:OnBlock()
     local now = API.Now()
     for _, entry in ipairs(self.am) do
@@ -274,6 +348,9 @@ function Tank:OnBlock()
     end
 end
 
+--- True within HIT_WINDOW seconds of a hit that counts against your mitigation.
+---@param now number|nil
+---@return boolean
 function Tank:BeingHit(now)
     return ((now or API.Now()) - self.lastRelevantHit) <= HIT_WINDOW
 end
@@ -282,6 +359,23 @@ end
 
 local ticker
 
+--- Per-second timeline for the pull report's chart: was I being hit, and was
+--- my mitigation up (+1 per covered tick, -1 per uncovered tick)?
+local function Sample(p, now, hit, active)
+    local tl = p.tl
+    local sec = math.floor(now - p.start) + 1
+    if sec > TIMELINE_MAX then
+        tl.trunc = true
+        return
+    end
+    if sec > tl.n then tl.n = sec end
+    if not hit then return end
+    tl.att[sec] = true
+    if active ~= nil then tl.cov[sec] = (tl.cov[sec] or 0) + (active and 1 or -1) end
+end
+
+-- Every TICK seconds during a pull: time under attack, covered time, the
+-- current and longest gap, LAPSE, and time with loose mobs or an attacked healer.
 local function Tick()
     local p = Tank.pull
     if not p then return end
@@ -290,16 +384,21 @@ local function Tick()
     p.lastTick = now
     if dt <= 0 or dt > 2 then return end
     local primary = Tank.primary
-    if Tank:BeingHit(now) then
+    local beingHit = Tank:BeingHit(now)
+    local tracked = primary and primary.known
+    local active
+    if tracked then active = Tank:IsActive(primary, now) and true or false end
+    Sample(p, now, beingHit, active)
+    if beingHit then
         p.underAttack = p.underAttack + dt
-        if primary and primary.known then
-            if Tank:IsActive(primary, now) then
+        if tracked then
+            if active then
                 p.covered = p.covered + dt
                 p.gap = 0
             else
                 p.gap = p.gap + dt
                 if p.gap > p.longestGap then p.longestGap = p.gap end
-                if p.gap >= (TF.db.alerts.lapseSeconds or 3) and Tank:IsReady(primary, now) then
+                if p.gap >= (TF.db.alerts.lapseSeconds or 3) and Tank:CanUse(primary, now) then
                     TF:Fire("LAPSE", primary, p.gap)
                 end
             end
@@ -315,6 +414,7 @@ local function Tick()
     TF:Fire("PULL_TICK", p, now)
 end
 
+--- Start recording a pull (only while tanking). Fires PULL_START.
 function Tank:StartPull()
     if self.pull or not self.isTank then return end
     local now = API.Now()
@@ -328,14 +428,18 @@ function Tank:StartPull()
         casts = {}, taunts = 0, interrupts = 0, defensives = {},
         aggroLost = 0, aggroLostTo = {}, healerAttacked = 0, looseTime = 0,
         deaths = {},
+        tl = { n = 0, att = {}, cov = {}, hit = {} },
         primaryName = self.primary and API.GetSpellName(self.primary.spell),
         primaryTarget = self.primary and self.primary.def.target,
         primaryKnown = self.primary and self.primary.known,
+        -- ENCOUNTER_START often arrives before combat does.
+        encounter = self.encounter,
     }
     if not ticker then ticker = C_Timer.NewTicker(TICK, Tick) end
     TF:Fire("PULL_START", self.pull)
 end
 
+--- Finish the pull, if any: fires PULL_END with the pull, then re-evaluates tanking.
 function Tank:EndPull()
     local p = self.pull
     if not p then return end
@@ -347,6 +451,7 @@ function Tank:EndPull()
     self:Evaluate()
 end
 
+--- Record a death and which major defensives were still ready. Fires DEATH while tanking.
 function Tank:OnDeath()
     local p = self.pull
     local ready = {}
@@ -378,11 +483,16 @@ for _, ev in ipairs({ "UPDATE_SHAPESHIFT_FORM", "PLAYER_ROLES_ASSIGNED", "GROUP_
     end)
 end
 
-TF:RegisterEvent("SPELL_UPDATE_COOLDOWN", function() Tank:Calibrate() end)
+-- SPELL_UPDATE_COOLDOWN fires several times per global cooldown; read the
+-- cooldowns once, on the next frame.
+TF:RegisterEvent("SPELL_UPDATE_COOLDOWN", TF:Coalesce(function() Tank:Calibrate() end))
 
+-- UNIT_AURA can fire many times a frame in combat; sync the buff timers once,
+-- on the next frame, however many arrive.
 local auraPending = false
+local syncAuras = TF:Coalesce(function() Tank:SyncAuras() end)
 TF:RegisterUnitEvent("UNIT_AURA", { "player" }, function()
-    Tank:SyncAuras()
+    syncAuras()
     -- Righteous Fury is an aura; re-check posture out of combat, debounced.
     if TF.inCombat or auraPending then return end
     auraPending = true
@@ -415,8 +525,16 @@ end)
 TF:RegisterEvent("PLAYER_DEAD", function() Tank:OnDeath() end)
 
 TF:RegisterEvent("ENCOUNTER_START", function(_, _, name)
-    if Tank.pull then Tank.pull.encounter = API.PlainString(name) end
+    Tank.encounter = API.PlainString(name)
+    if Tank.pull then Tank.pull.encounter = Tank.encounter end
 end)
+
+TF:RegisterEvent("ENCOUNTER_END", function()
+    Tank.encounter = nil
+end)
+
+-- A missed ENCOUNTER_END (a release and run back) mustn't name the next zone's pulls.
+TF:On("ENTERING_WORLD", function() Tank.encounter = nil end)
 
 TF:On("COMBAT", function(inCombat)
     if inCombat then
@@ -436,4 +554,4 @@ TF:AddCommand("status", function()
         tostring(Tank.class), Tank.isTank and "yes" or "no",
         reason and (" (" .. reason .. ")") or "",
         ns.Healer and ns.Healer:Describe() or "?"))
-end, "- what TankForgeUI thinks is going on")
+end, "- what TankForgeUI thinks is going on (tanking, kit, healer, ...)", { group = "Tanking" })

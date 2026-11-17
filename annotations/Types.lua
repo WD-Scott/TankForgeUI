@@ -1,0 +1,201 @@
+---@meta
+-- annotations/Types.lua
+-- Type definitions for the Lua language server (LuaLS): editor hovers, completion
+-- and type checks. Never loaded by the game (not in the .toc) and not packaged.
+
+---@alias TFMessage
+---| "LOADED"          # () settings merged into TF.db (ADDON_LOADED)
+---| "LOGIN"           # () PLAYER_LOGIN
+---| "ENTERING_WORLD"  # (isLogin: boolean, isReload: boolean)
+---| "COMBAT"          # (inCombat: boolean) after AfterCombat's queue has run, on leaving
+---| "UNLOCKED"        # (unlocked: boolean) /tf unlock and lock
+---| "KIT_CHANGED"     # () Tank:Build finished
+---| "TANK_CHANGED"    # (isTank: boolean)
+---| "CAST"            # (entry: TankEntry, now: number) one of your tracked spells was cast
+---| "HIT"             # (kind: string, physical: boolean?, kindSecret: boolean) only while the log is on
+---| "LAPSE"           # (primary: TankEntry, gap: number) hit without your primary mitigation while it's ready
+---| "DEATH"           # (ready: string[]) you died while tanking; names of major defensives still ready
+---| "PULL_START"      # (pull: Pull)
+---| "PULL_TICK"       # (pull: Pull, now: number) every 0.25s during a pull
+---| "PULL_END"        # (pull: Pull) with duration set
+---| "LOOSE"           # (mob: string?, victim: string, onHealer: boolean, wasOnMe: boolean, unit: string,
+---|                     counted: boolean) counted: false when it's the same mob flipping back within Threat.RECOUNT
+---| "LOOSE_COUNT"     # (count: integer, onHealer: boolean) when either changes
+---| "HEALER_CHANGED"  # (unit: string?)
+---| "STANCES_CHANGED" # (count: integer) stance buttons in the HUD's flyout, after an out-of-combat rebuild
+
+---@class TankForgeUI
+---@field db TankForgeUISettings saved per-character settings (TankForgeUIDB), set on LOADED
+---@field inCombat boolean
+---@field version string
+---@field COLOR string chat color for the add-on's name, "rrggbb"
+---@field commands table<string|integer, any> name -> command, plus the names in order
+
+---@class TankForgeUISettings
+---@field tankMode "auto"|"always"
+---@field scale number
+---@field hidePlayerFrame boolean
+---@field hideActionTooltips boolean
+---@field shiftShowsTooltips boolean
+---@field hideBarArt boolean
+---@field hideObjectives "never"|"always"|"instance"|"combat"
+---@field keepClear boolean
+---@field layoutHash string|nil Setup.LayoutHash of the layout /tf setup last wrote
+---@field layoutNoticed string|nil the shipped layout hash already announced at login
+---@field layoutCheck boolean|nil check the active Edit Mode layout after the reload that follows /tf setup
+---@field hud {enabled: boolean, alpha: number, oocAlpha: number, portrait: boolean, showIdle: boolean}
+---@field threat {enabled: boolean, rows: integer}
+---@field healer {enabled: boolean, alpha: number, oocAlpha: number, dimOutOfRange: boolean}
+---@field party {enabled: boolean, alpha: number, oocAlpha: number, hideHealer: boolean, dimOutOfRange: boolean}
+---@field alerts TankForgeUIAlertSettings
+---@field professions {enabled: boolean, angle: number}
+---@field stances {enabled: boolean, open: boolean}
+---@field npcDialogs {enabled: boolean}
+---@field loot {delay: boolean, revealAt: number}
+---@field report {enabled: boolean, autoShow: boolean, openWorld: boolean, hideAfter: number, charts: boolean}
+---@field runs {enabled: boolean, toast: boolean, keep: integer}
+---@field positions table<string, {[1]: string, [2]: string, [3]: number, [4]: number}>
+---@field history PullRecord[] newest first, at most 30
+---@field runHistory RunRecord[] newest first
+---@field currentRun RunRecord|nil
+---@field healerName string|nil picked with /tf healer
+---@field welcomed boolean
+
+---@class TankForgeUIAlertSettings
+---@field enabled boolean
+---@field sound boolean
+---@field mitigationLapse boolean being hit with the primary mitigation down and ready
+---@field lostAggro boolean a mob went to someone else
+---@field healerAttacked boolean a mob is on the healer
+---@field death boolean what was still ready when you died
+---@field defensiveReady boolean a major defensive came back mid-pull
+---@field lapseSeconds number seconds hit without mitigation before LAPSE
+
+-- Class kits (Data/Kits.lua) --------------------------------------------------
+
+---@class KitSpell
+---@field spell integer lowest rank
+---@field alt integer[]|nil higher ranks, ascending
+---@field key string|nil name used in pull cast counts (mitigation)
+---@field buff integer|nil aura to read the real timer from
+---@field duration number|nil buff length, seconds
+---@field maxDuration number|nil cap when a recast extends the buff
+---@field cd number|nil cooldown, seconds
+---@field primary boolean|nil the mitigation you're judged on
+---@field physical boolean|nil only mitigates physical hits
+---@field target number|nil coverage goal, 0..1
+---@field blocks integer|nil full blocks that use the buff up
+---@field forms integer[]|nil form IDs the spell needs to be castable (nil: any)
+---@field shield boolean|nil needs a shield in the off hand
+---@field kind "defensive"|"taunt"|"aoeTaunt"|"interrupt"|"stop"|"other"|nil
+---@field major boolean|nil a big defensive (death report, "ready" alert)
+
+---@class Kit
+---@field posture {forms: integer[]?, formSpells: integer[]?, auras: integer[]?}
+---@field power "Rage"|"Mana"|"Energy"
+---@field am KitSpell[] active mitigation
+---@field icons KitSpell[] HUD icons
+---@field flyout string|nil what the stance flyout holds ("Stances", "Forms", "Auras")
+
+---@class TankEntry
+---@field def KitSpell
+---@field spell integer highest known rank (or highest rank when none is known)
+---@field known boolean
+---@field isAM boolean
+
+-- Pulls and runs ----------------------------------------------------------------
+
+---@class Pull live pull (Tank.pull), handed to PULL_START/TICK/END
+---@field start number API.Now() at the start
+---@field time number time() at the start
+---@field zone string
+---@field instance boolean in a dungeon, raid or scenario
+---@field encounter string|nil boss name, from ENCOUNTER_START
+---@field duration number|nil set at PULL_END
+---@field hits integer every hit
+---@field hitsRelevant integer hits your primary mitigation applies to
+---@field hitsUnmitigated integer relevant hits while it was down
+---@field underAttack number seconds being hit
+---@field covered number seconds being hit with mitigation up
+---@field gap number current stretch hit without it (nil after the pull)
+---@field longestGap number
+---@field casts table<string|integer, integer> kit key (or spell) -> casts
+---@field taunts integer
+---@field interrupts integer
+---@field defensives string[] names, in cast order
+---@field aggroLost integer
+---@field aggroLostTo table<string, integer> member name -> times
+---@field healerAttacked number seconds a mob was on the healer
+---@field looseTime number seconds with any loose mob
+---@field deaths {t: number, ready: string[]}[]
+---@field tl {n: integer, att: table<integer, true>, cov: table<integer, integer>, hit: table<integer, integer>, trunc: boolean?}
+---@field primaryName string|nil
+---@field primaryTarget number|nil
+---@field primaryKnown boolean|nil
+
+---@class EncodedTimeline
+---@field n integer seconds
+---@field s string per second: "0" not hit, "1" hit with mitigation, "2" without, "3" untracked
+---@field h string per second: hits, 0-9
+---@field trunc boolean|nil longer than Charts.MAX_SECONDS
+
+---@class PullRecord saved in TF.db.history (Report.MakeRecord)
+---@field time number
+---@field zone string
+---@field encounter string|nil
+---@field duration number
+---@field hits integer
+---@field hitsRelevant integer
+---@field hitsUnmitigated integer
+---@field underAttack number
+---@field longestGap number
+---@field coverage integer|nil percent of underAttack covered
+---@field primaryName string|nil
+---@field primaryTarget number|nil
+---@field primaryKnown boolean|nil
+---@field taunts integer
+---@field interrupts integer
+---@field defensives string[]
+---@field aggroLost integer
+---@field aggroLostTo table<string, integer>
+---@field healerAttacked number
+---@field looseTime number
+---@field deaths {t: number, ready: string[]}[]
+---@field unusedAM string[]
+---@field tl EncodedTimeline|nil
+---@field notes string[]
+
+---@class RunPull compact pull kept in a run
+---@field t number time()
+---@field d number duration
+---@field boss string|nil
+---@field hits integer
+---@field rel integer
+---@field unmit integer
+---@field ua number seconds under attack
+---@field cov number seconds covered
+---@field gap number longest gap
+---@field known true|nil mitigation tracked
+---@field taunts integer
+---@field ints integer
+---@field lost integer
+---@field heal number seconds healer attacked
+---@field deaths number[] seconds into the pull
+---@field tl EncodedTimeline|nil
+
+---@class RunRecord
+---@field id number time() at the start; unique
+---@field key string "instanceID:difficultyID"
+---@field instance string
+---@field instanceID number|nil
+---@field difficultyID number|nil
+---@field difficulty string|nil
+---@field size number|nil
+---@field start number
+---@field finish number|nil set when the run ends
+---@field lastSeen number|nil
+---@field leftAt number|nil time() you left the instance
+---@field pulls RunPull[]
+---@field bosses {name: string, ok: boolean, t: number}[]
+---@field am string|nil primary mitigation name
+---@field target number|nil coverage goal

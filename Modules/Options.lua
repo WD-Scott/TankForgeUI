@@ -19,17 +19,24 @@ local controls = {}   -- everything with a :Refresh(), re-read when the window o
 
 -- Settings access -------------------------------------------------------------
 
+--- A setting by key path: Get({ "party", "enabled" }) is TF.db.party.enabled.
+---@param path string[]
+---@return any
 local function Get(path)
     local t = TF.db
     for i = 1, #path - 1 do t = t[path[i]] end
     return t[path[#path]]
 end
 
+---@param path string[]
+---@param value any
 local function Set(path, value)
     local t = TF.db
     for i = 1, #path - 1 do t = t[path[i]] end
     t[path[#path]] = value
 end
+
+TF.GetSetting, TF.SetSetting = Get, Set
 
 local function ApplyAll()
     TF:ApplyHiding()
@@ -204,16 +211,16 @@ local function Column(x, y)
             end)
             b:SetPoint("TOPLEFT", self.x + (i - 1) * (bw + gap), self.y)
             b.value, b.title, b.note = c[1], label, note
-            function b:Refresh()
-                self.selected = Get(path) == self.value
-                local col = self.selected and C.accent or C.muted
-                self.label:SetTextColor(col[1], col[2], col[3])
-                Style.SetBorderColor(self, unpack(self.selected and HOVER or BORDER))
-                self.bg:SetVertexColor(self.selected and 0.17 or 0.13, self.selected and 0.15 or 0.14,
-                    self.selected and 0.12 or 0.17, 1)
+            b.Refresh = function(btn)
+                btn.selected = Get(path) == btn.value
+                local tint = btn.selected and C.accent or C.muted
+                btn.label:SetTextColor(tint[1], tint[2], tint[3])
+                Style.SetBorderColor(btn, unpack(btn.selected and HOVER or BORDER))
+                btn.bg:SetVertexColor(btn.selected and 0.17 or 0.13, btn.selected and 0.15 or 0.14,
+                    btn.selected and 0.12 or 0.17, 1)
             end
             -- Keep the chosen one's amber outline when the mouse leaves.
-            b:HookScript("OnLeave", function(self) self:Refresh() end)
+            b:HookScript("OnLeave", function(btn) btn:Refresh() end)
             group[#group + 1] = b
             controls[#controls + 1] = b
         end
@@ -299,21 +306,47 @@ local function Build()
     L:Choice("Quest tracker", { "hideObjectives" }, {
         { "never", "Never" }, { "always", "Always" }, { "instance", "Dungeons" }, { "combat", "Combat" },
     }, "When to hide the \"All Objectives\" quest tracker. It always shows in Edit Mode so you can move it.")
+    L:Check("Keep tooltips and bags off the action bars", { "keepClear" },
+        "Tooltips and bags open above your action bars instead of on top of them.")
+    L:Check("Move NPC windows", { "npcDialogs", "enabled" },
+        "Quest, gossip, vendor, trainer, flight and bank windows open at the \"NPC dialogs\" box "
+        .. "instead of the top left. Move the box with /tf unlock.",
+        { onChange = function() if TF.ApplyNpcDialogs then TF:ApplyNpcDialogs() end end })
+    L:Check("Loot rolls wait until after combat", { "loot", "delay" },
+        "Need / Greed / Pass windows stay hidden in combat and appear when it ends. "
+        .. "A roll about to run out (10 seconds left) shows anyway, so it isn't passed for you.",
+        { onChange = function() if TF.ApplyLoot then TF:ApplyLoot() end end })
     L:Section("Alerts")
     L:Check("Alerts on", { "alerts", "enabled" })
     L:Check("Sounds", { "alerts", "sound" }, nil, { indent = true })
     L:Check("A mob is on your healer", { "alerts", "healerAttacked" }, nil, { indent = true })
     L:Check("A mob is on someone else", { "alerts", "lostAggro" }, nil, { indent = true })
     L:Check("Being hit with Shield Block down", { "alerts", "mitigationLapse" },
-        "Your main mitigation (Shield Block, Demoralizing Roar or Holy Shield) is ready but down while you're being hit.",
+        "Your main mitigation (Shield Block, Demoralizing Roar or Holy Shield) is down while you're being hit, "
+        .. "and you could cast it: off cooldown, in the right stance or form, with a shield if it needs one.",
         { indent = true })
+    L:Choice("...where", { "alerts", "lapseWhere" }, {
+        { "always", "Everywhere" }, { "group", "Groups & dungeons" }, { "instance", "Dungeons only" },
+    }, "Solo in the open world it's mostly noise, so by default it only fires in a group or a dungeon.")
     L:Check("What was ready when you died", { "alerts", "death" }, nil, { indent = true })
     L:Check("A big defensive came back", { "alerts", "defensiveReady" }, nil, { indent = true })
 
     -- Right column
     local R = Column(RIGHT_X, top)
     R:Section("Frames")
-    R:Check("Tank HUD", { "hud", "enabled" })
+    R:Check("Tank HUD", { "hud", "enabled" }, nil,
+        { onChange = function() if TF.ApplyStances then TF:ApplyStances() end end })
+    R:Check("...show your portrait", { "hud", "portrait" },
+        "Your portrait on the left of the HUD's health and power bars, since the player frame is hidden.",
+        { indent = true, onChange = function() if ns.HUD then ns.HUD:Build() end end })
+    R:Check("...stance buttons", { "stances", "enabled" },
+        "Your stance or form buttons in a flyout on the HUD's right edge, in place of Blizzard's stance bar. "
+        .. "The tab opens and closes it, and both work in combat.",
+        { indent = true, onChange = function() if TF.ApplyStances then TF:ApplyStances() end end })
+    R:Check("...stay up, compact, when not tanking", { "hud", "showIdle" },
+        "Keeps your portrait, bars and stance buttons up while you're not tanking, "
+        .. "so you can click back into your tanking stance.",
+        { indent = true, onChange = function() if ns.HUD then ns.HUD:Refresh() end end })
     R:Check("Threat and loose mobs", { "threat", "enabled" })
     R:Check("Healer panel", { "healer", "enabled" })
     R:Check("Party frames  |cff" .. Style.HEX.muted .. "(needs /reload)|r", { "party", "enabled" },
@@ -322,10 +355,27 @@ local function Build()
     R:Check("...leave out your healer", { "party", "hideHealer" },
         "Your healer already has their own panel, so they're left off the party frames. "
         .. "Only applies while the healer panel is on.", { indent = true })
+    R:Check("Professions button on minimap", { "professions", "enabled" },
+        "A button on the edge of the minimap that lists your profession spells. Drag it to move it around the edge.",
+        { onChange = function() if TF.ApplyProfessions then TF:ApplyProfessions() end end })
     R:Section("Pull report")
     R:Check("Record pulls", { "report", "enabled" })
     R:Check("Open after each pull", { "report", "autoShow" }, nil, { indent = true })
     R:Check("Also outside dungeons and raids", { "report", "openWorld" }, nil, { indent = true })
+    R:Check("Charts", { "report", "charts" },
+        "A timeline of the pull (when you were hit with and without your mitigation) and your coverage over recent pulls.",
+        { indent = true, onChange = function()
+            if ns.Report.frame:IsShown() then ns.Report:Render(ns.Report.shownIndex or 1) end
+        end })
+    R:Section("Runs")
+    R:Check("Record dungeon and raid runs", { "runs", "enabled" },
+        "Keeps every pull of a dungeon or raid run together, so you can look back at a whole run and compare runs. "
+        .. "A run ends when you go into another instance, after 15 minutes outside, or with /tf run end.",
+        { onChange = function() if ns.Runs then ns.Runs:Check() end end })
+    R:Check("Show a summary when a run ends", { "runs", "toast" }, nil, { indent = true })
+    local runsButton = Style.Button(win, "Open runs", 120, 22, function() win:Hide() ns.Runs:Open() end)
+    runsButton:SetPoint("TOPLEFT", R.x + 22, R.y - 2)
+    R.y = R.y - 30
     R:Section("Tanking")
     R:Check("Always treat me as the tank", { "tankMode" },
         "Normally TankForgeUI turns on when you're in Defensive Stance, Bear Form or Righteous Fury, "
@@ -417,13 +467,14 @@ local function Build()
     win.log = log
 end
 
+--- Open the /tf options window, re-reading every control.
 function TF:OpenOptions()
     if not win then Build() end
     for _, c in ipairs(controls) do c:Refresh() end
     win:Show()
 end
 
-TF:AddCommand("options", function() TF:OpenOptions() end, "- open this addon's options (same as /tf)")
+TF:AddCommand("options", function() TF:OpenOptions() end, "- open the options window (same as /tf)", { group = "Setup" })
 
 -- An entry under Options > AddOns that opens the window.
 TF:On("LOGIN", function()

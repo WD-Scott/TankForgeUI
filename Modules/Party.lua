@@ -1,7 +1,7 @@
 -- Modules/Party.lua
 -- Minimal party frames with portraits: portrait, name, health, a thin power
--- bar. The border turns red when a mob is on that member, and a small plus
--- marks the healer. Left-click targets, right-click opens the unit menu.
+-- bar. The border turns red when a mob is on that member, and a role icon
+-- (tank, healer, damage) sits on the portrait's corner. Left-click targets, right-click opens the unit menu.
 --
 -- Built from secure unit buttons, so they work in combat. They are created
 -- and placed at load, and never moved in combat. Blizzard's party frames are
@@ -88,10 +88,8 @@ local function MakeButton(i)
 
     b.leader = Style.LeaderBadge(b, 14)
 
-    b.healerMark = Style.Text(b, 14)
-    b.healerMark:SetPoint("BOTTOMRIGHT", b.portrait, "BOTTOMRIGHT", 1, -1)
-    b.healerMark:SetText("+")
-    b.healerMark:SetTextColor(0.3, 1, 0.45)
+    b.role = Style.RoleIcon(b, 14)
+    b.role:SetPoint("BOTTOMRIGHT", b.portrait, "BOTTOMRIGHT", 2, -2)
 
     b:SetScript("OnEnter", function(self)
         if GameTooltip_SetDefaultAnchor then GameTooltip_SetDefaultAnchor(GameTooltip, self) end
@@ -111,9 +109,9 @@ end
 
 -- Updating -------------------------------------------------------------------
 
--- Who the button shows: portrait, name and class color. These only change
--- when the game says so (roster, portrait or name events), so they aren't
--- redrawn on the timer; a portrait is one of the costlier frame calls.
+--- Who the button shows: portrait, name and class color. These only change
+--- when the game says so (roster, portrait or name events), so they aren't
+--- redrawn on the timer; a portrait is one of the costlier frame calls.
 function Party:UpdateIdentity(b)
     local unit = b.unit
     if not API.UnitExists(unit) then return end
@@ -124,7 +122,18 @@ function Party:UpdateIdentity(b)
     if SetPortraitTexture then pcall(SetPortraitTexture, b.portrait, unit) end
 end
 
--- Everything that changes from moment to moment, on the 0.2s timer.
+--- The role icon a member gets: their group role, or the healer's icon for
+--- the member picked or guessed as your healer when the group has no roles.
+---@param unit string
+---@return string|nil role "TANK", "HEALER", "DAMAGER", or nil for no icon
+function Party.RoleFor(unit)
+    local role = API.UnitRole(unit)
+    if role and Style.ROLE_COORDS[role] then return role end
+    if ns.Healer and ns.Healer.unit == unit then return "HEALER" end
+    return nil
+end
+
+--- Everything that changes from moment to moment, on the 0.2s timer.
 function Party:UpdateButton(b)
     local unit = b.unit
     if not API.UnitExists(unit) then return end
@@ -152,20 +161,17 @@ function Party:UpdateButton(b)
 
     -- A mob is on them (threat status 2 or 3 on anything).
     local status = API.PlainNumber((API.Safe(UnitThreatSituation, unit)))
-    if status and status >= 2 then
-        Style.SetBorderColor(b, 0.95, 0.15, 0.15, 1)
-    else
-        Style.SetBorderColor(b, 0, 0, 0, 1)
-    end
+    Style.SetAlertBorder(b, status and status >= 2, 0.95)
 
-    b.healerMark:SetShown(ns.Healer and ns.Healer.unit == unit or false)
+    Style.SetRoleIcon(b.role, Party.RoleFor(unit))
     b.leader:SetShown(API.IsLeader(unit))
 
     -- The container carries your opacity setting; this only adds range dimming.
     API.ApplyRangeAlpha(b, unit, 1, 0.5, TF.db.party.dimOutOfRange)
 end
 
--- Give the buttons, top to bottom, every party member except the healer.
+--- Give the buttons, top to bottom, every party member except the healer.
+--- Out of combat only; queued until combat ends otherwise.
 function Party:Assign()
     if not built then return end
     if InCombatLockdown() then
@@ -196,6 +202,17 @@ function Party:Assign()
     self:UpdateAll()
 end
 
+--- The button showing `unit`, or nil (nameplates, target, a member not on a button).
+---@param unit string|nil
+---@return table|nil button
+function Party.ButtonFor(unit)
+    if unit == nil then return nil end
+    for _, b in ipairs(Party.buttons) do
+        if b.unit == unit then return b end
+    end
+    return nil
+end
+
 function Party:UpdateIdentityAll()
     for _, b in ipairs(self.buttons) do self:UpdateIdentity(b) end
 end
@@ -212,8 +229,7 @@ end
 
 -- Blizzard's party frames ------------------------------------------------------
 
-local hiddenParent = CreateFrame("Frame")
-hiddenParent:Hide()
+local hiddenParent = Style.hiddenParent
 
 local function HideBlizzard()
     if InCombatLockdown() then return end
@@ -227,6 +243,7 @@ end
 
 -- Setup ----------------------------------------------------------------------
 
+--- Create the secure party buttons (once, out of combat).
 function Party:Build()
     if built or not TF.db.party.enabled then return end
     if InCombatLockdown() then
@@ -255,16 +272,26 @@ end)
 for _, ev in ipairs({ "UNIT_PORTRAIT_UPDATE", "UNIT_NAME_UPDATE" }) do
     TF:RegisterEvent(ev, function(_, unit)
         if not built then return end
-        for _, b in ipairs(Party.buttons) do
-            if unit == nil or b.unit == unit then Party:UpdateIdentity(b) end
+        if unit == nil then
+            Party:UpdateIdentityAll()
+            return
         end
+        local b = Party.ButtonFor(unit)
+        if b then Party:UpdateIdentity(b) end
     end)
 end
--- Moment-to-moment state that has its own event, so it doesn't wait for the timer.
-for _, ev in ipairs({ "PARTY_LEADER_CHANGED", "UNIT_CONNECTION", "UNIT_THREAT_SITUATION_UPDATE",
-    "PLAYER_ROLES_ASSIGNED" }) do
-    TF:RegisterEvent(ev, function()
-        if built then Party:UpdateAll() end
+
+-- Moment-to-moment state that has its own event, so it doesn't wait for the
+-- timer: redrawn on the next frame, once, however many arrive. The unit events
+-- fire for every nameplate too (threat changes per mob in a pull); only a
+-- change for someone on a button counts.
+local dirty = false
+for _, ev in ipairs({ "PARTY_LEADER_CHANGED", "PLAYER_ROLES_ASSIGNED" }) do
+    TF:RegisterEvent(ev, function() dirty = true end)
+end
+for _, ev in ipairs({ "UNIT_CONNECTION", "UNIT_THREAT_SITUATION_UPDATE" }) do
+    TF:RegisterEvent(ev, function(_, unit)
+        if unit == nil or Party.ButtonFor(unit) then dirty = true end
     end)
 end
 
@@ -275,7 +302,7 @@ TF:On("UNLOCKED", function() Party:ApplyAlpha() end)
 local elapsed = 0
 container:HookScript("OnUpdate", function(_, dt)
     elapsed = elapsed + dt
-    if elapsed < 0.2 then return end
-    elapsed = 0
+    if elapsed < 0.2 and not dirty then return end
+    elapsed, dirty = 0, false
     Party:UpdateAll()
 end)

@@ -1,28 +1,42 @@
 -- Modules/Report.lua
 -- After each pull: what happened and what to work on. No score.
--- Keeps the last 30 pulls per character; /tf report shows the latest.
+-- Keeps the last 100 pulls per character (a whole dungeon run); /tf report shows the latest.
 local _, ns = ...
 local TF = ns.TF
 local API = ns.API
 local Style = ns.Style
 local Tank = ns.Tank
+local Charts = ns.Charts
 
 local Report = {}
 ns.Report = Report
 
-local KEEP = 30
+local KEEP = 100
+local UNUSED_AM_SECONDS = 45 -- a trash pull this long, or any boss, should see secondary mitigation
 local MIN_SECONDS = 6
 local WIDTH = 310
 local PAD = 10
 local C = Style.colors
+local CHART_W = WIDTH - 2 * PAD
+local TREND_PULLS = 10
+Report.MIN_SECONDS = MIN_SECONDS
 
 -- Building a record ------------------------------------------------------------
 
+--- a as a whole percentage of b, rounded; nil when b is missing or 0.
+---@param a number
+---@param b number|nil
+---@return integer|nil
 local function Pct(a, b)
     if not b or b <= 0 then return nil end
     return math.floor(a / b * 100 + 0.5)
 end
+Report.Pct = Pct
 
+--- "What to work on" lines for a pull record: coverage under target, a long gap,
+--- mobs lost (and no taunt), mobs on the healer, unused mitigation, deaths.
+---@param r PullRecord
+---@return string[]
 local function Notes(r)
     local notes = {}
     local am = r.primaryName or "Your mitigation"
@@ -62,6 +76,9 @@ local function Notes(r)
     return notes
 end
 
+--- The saved history record for a finished pull (Tank.pull), notes included.
+---@param p Pull
+---@return PullRecord
 local function MakeRecord(p)
     local r = {
         time = p.time, zone = p.zone, encounter = p.encounter, duration = p.duration,
@@ -73,9 +90,10 @@ local function MakeRecord(p)
         aggroLost = p.aggroLost, aggroLostTo = p.aggroLostTo,
         healerAttacked = p.healerAttacked, looseTime = p.looseTime, deaths = p.deaths,
         unusedAM = {},
+        tl = Charts.EncodeTimeline(p.tl, p.duration),
     }
-    -- A secondary mitigation (Demoralizing Shout) never pressed in a longer pull.
-    if p.duration >= 20 then
+    -- A secondary mitigation (Demoralizing Shout) never pressed on a boss or a long pull.
+    if p.encounter or p.duration >= UNUSED_AM_SECONDS then
         for _, e in ipairs(Tank.am) do
             if e ~= Tank.primary and e.known and not p.casts[e.def.key or e.def.spell] then
                 r.unusedAM[#r.unusedAM + 1] = API.GetSpellName(e.spell) or "?"
@@ -85,6 +103,7 @@ local function MakeRecord(p)
     r.notes = Notes(r)
     return r
 end
+Report.Notes, Report.MakeRecord = Notes, MakeRecord
 
 -- Window ---------------------------------------------------------------------
 
@@ -121,6 +140,18 @@ local function StatCell(i)
     return cell
 end
 
+-- Charts (Options > Pull report > Charts)
+local function ChartHead()
+    local fs = Style.Text(f, 10)
+    fs:SetTextColor(unpack(C.muted))
+    fs:SetJustifyH("LEFT")
+    return fs
+end
+f.timelineHead = ChartHead()
+f.timeline = Charts.Timeline(f, CHART_W, 30, { legend = true })
+f.trendHead = ChartHead()
+f.trend = Charts.Bars(f, CHART_W, 26)
+
 f.workOn = Style.Text(f, 11)
 f.workOn:SetText("What to work on")
 f.workOn:SetTextColor(unpack(C.accent))
@@ -149,30 +180,100 @@ Style.Movable(f, "report", "Pull report", { "RIGHT", "RIGHT", -40, -40 })
 
 local shownIndex = 1   -- 1 = newest
 
-local function When(t)
+--- "Today 14:05" or "Nov 03 14:05" for a time() value; "" for nil.
+---@param t number|nil
+---@return string
+function Report.When(t)
     if not t then return "" end
     local today = date("%Y%m%d")
     local day = date("%Y%m%d", t)
     return (day == today and "Today " or date("%b %d ", t)) .. date("%H:%M", t)
 end
 
-local function CoverageColor(r)
-    if not r.coverage then return C.muted end
-    local target = (r.primaryTarget or 0.75) * 100
-    if r.coverage >= target then return C.good end
-    if r.coverage >= target - 15 then return C.warn end
+--- good at or over target, warn within 15 points under it, bad below that,
+--- muted when coverage isn't tracked.
+---@param cov number|nil percent
+---@param target number|nil fraction, default 0.75
+---@return number[] color
+function Report.CoverageColorFor(cov, target)
+    if not cov then return C.muted end
+    target = (target or 0.75) * 100
+    if cov >= target then return C.good end
+    if cov >= target - 15 then return C.warn end
     return C.bad
 end
 
+--- Report.CoverageColorFor for a record.
+---@param r PullRecord
+---@return number[]
+local function CoverageColor(r)
+    return Report.CoverageColorFor(r.coverage, r.primaryTarget)
+end
+Report.CoverageColor = CoverageColor
+
+-- The timeline of this pull, then the coverage of it and the pulls before it.
+local function RenderCharts(r, index, y)
+    local history = TF.db.history
+    local on = TF.db.report.charts
+    local showTimeline = on and r.tl ~= nil
+    local showTrend = on and r.coverage ~= nil
+    f.timelineHead:SetShown(showTimeline)
+    f.timeline:SetShown(showTimeline)
+    f.trendHead:SetShown(showTrend)
+    f.trend:SetShown(showTrend)
+    if showTimeline then
+        f.timelineHead:ClearAllPoints()
+        f.timelineHead:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -y)
+        f.timelineHead:SetText("Timeline" .. (r.tl.trunc and "  (first 15 minutes)" or ""))
+        y = y + 15
+        f.timeline:ClearAllPoints()
+        f.timeline:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -y)
+        f.timeline:SetData(r.tl, r.deaths, r.primaryName)
+        y = y + f.timeline:GetHeight() + 10
+    end
+    if showTrend then
+        local items, last = {}, math.min(#history, index + TREND_PULLS - 1)
+        for k = last, index, -1 do
+            local rec = history[k]
+            items[#items + 1] = {
+                value = rec.coverage,
+                color = CoverageColor(rec),
+                outline = k == index and C.text or nil,
+                onClick = function() Report:Render(k) end,
+                tip = function(tt)
+                    tt:SetText(rec.encounter or rec.zone or "Pull", 1, 1, 1)
+                    tt:AddLine(Report.When(rec.time) .. "  " .. API.FormatSeconds(rec.duration), C.muted[1], C.muted[2], C.muted[3])
+                    tt:AddLine((rec.primaryName or "Mitigation") .. " coverage: " .. (rec.coverage and (rec.coverage .. "%") or "-"), 1, 1, 1)
+                    if k ~= index then tt:AddLine("Click to open this pull", C.muted[1], C.muted[2], C.muted[3]) end
+                end,
+            }
+        end
+        f.trendHead:ClearAllPoints()
+        f.trendHead:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -y)
+        f.trendHead:SetText(string.format("Coverage, last %d pull%s  (dotted line: %d%% target)", #items,
+            #items == 1 and "" or "s", math.floor((r.primaryTarget or 0.75) * 100 + 0.5)))
+        y = y + 15
+        f.trend:ClearAllPoints()
+        f.trend:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -y)
+        f.trend:SetData(items, { max = 100, ref = (r.primaryTarget or 0.75) * 100, gap = 3 })
+        y = y + f.trend:GetHeight() + 12
+    end
+    return y
+end
+
+--- Draw history[index] (1 = newest) in the report window.
+---@param index integer
+---@return boolean false when there is no such pull
 function Report:Render(index)
     local history = TF.db.history
     local r = history[index]
     if not r then return false end
     shownIndex = index
+    Report.shownIndex = index
 
     f.title:SetText((r.encounter or r.zone or "Pull") .. "  |cff" .. Style.Hex(C.muted)
         .. API.FormatSeconds(r.duration) .. "|r")
-    f.when:SetText(When(r.time))
+    f.when:SetText(Report.When(r.time))
 
     local hex = function(c) return "|cff" .. Style.Hex(c) end
     local am = r.primaryName or "Mitigation"
@@ -214,6 +315,7 @@ function Report:Render(index)
     cell.value:SetJustifyH("LEFT")
     cell.value:SetText(#(r.defensives or {}) > 0 and table.concat(r.defensives, ", ") or hex(C.muted) .. "none|r")
     y = y + 36
+    y = RenderCharts(r, index, y)
 
     f.workOn:ClearAllPoints()
     f.workOn:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -y)
@@ -249,6 +351,7 @@ end
 f.prev:SetScript("OnClick", function() Report:Render(shownIndex + 1) end)
 f.next:SetScript("OnClick", function() Report:Render(shownIndex - 1) end)
 
+--- Open the report window on history[index], or say there are no pulls yet.
 function Report:Open(index)
     if Report:Render(index or 1) then
         f.hideAt = nil
@@ -288,4 +391,4 @@ TF:On("COMBAT", function(inCombat)
     if inCombat and f:IsShown() and f.hideAt then f:Hide() end
 end)
 
-TF:AddCommand("report", function() Report:Open(1) end, "- show the last pull report")
+TF:AddCommand("report", function() Report:Open(1) end, "- show the last pull report (arrows page back through the last 100)", { group = "Tanking" })

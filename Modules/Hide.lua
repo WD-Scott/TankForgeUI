@@ -6,6 +6,7 @@
 -- hidden, so anything another addon attaches to it keeps working.
 local _, ns = ...
 local TF = ns.TF
+local Style = ns.Style
 
 -- Player frame ---------------------------------------------------------------
 
@@ -117,18 +118,51 @@ local function HookTooltips()
         local owner = self:GetOwner()
         if owner and owner.action ~= nil then self:Hide() end
     end)
+    -- Shift pressed or released while already hovering a button. Blizzard only
+    -- refreshes an action tooltip while the button still owns GameTooltip, and
+    -- hiding it ended that, so it's rebuilt here. Only GameTooltip is touched,
+    -- never the button's own OnEnter (running that from add-on code would
+    -- taint the button).
+    TF:RegisterEvent("MODIFIER_STATE_CHANGED", function(_, key)
+        if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
+        if not (TF.db and TF.db.hideActionTooltips and TF.db.shiftShowsTooltips) then return end
+        if SuppressTooltip() then
+            -- Released: hide it again, as if hovered without Shift.
+            local owner = GameTooltip:IsShown() and GameTooltip:GetOwner()
+            if owner and owner.action ~= nil then GameTooltip:Hide() end
+            return
+        end
+        local focus
+        if GetMouseFoci then
+            local foci = GetMouseFoci()
+            focus = foci and foci[1]
+        elseif GetMouseFocus then
+            focus = GetMouseFocus()
+        end
+        if not focus then return end
+        pcall(function()
+            if focus.action == nil or not focus:IsVisible() then return end
+            GameTooltip:SetOwner(focus, "ANCHOR_NONE")
+            if GameTooltip_SetDefaultAnchor then GameTooltip_SetDefaultAnchor(GameTooltip, focus) end
+            GameTooltip:SetAction(focus.action)
+            GameTooltip:Show()
+        end)
+    end)
 end
 
 -- Quest objective tracker ----------------------------------------------------
 --
--- Hidden always, in dungeons and raids, or in combat. The tracker holds
--- clickable quest-item buttons, so the game only lets it be hidden out of
--- combat; in combat it can only be made transparent, and it's hidden properly
--- once the fight ends. It always shows while Edit Mode is open, so it can be moved.
+-- Hidden always, in dungeons and raids, or in combat. Hidden by moving it under
+-- a hidden frame, out of combat. The tracker holds clickable quest-item buttons,
+-- so that can't happen in combat: then it's only made transparent, and moved
+-- once the fight ends. It's never shown, hidden or hooked directly, and no
+-- field is written on it: that tainted Blizzard's UI, and the game then blocked
+-- the action bars in combat. It always shows while Edit Mode is open, so it
+-- can be moved.
 
 ns.OBJECTIVE_MODES = { "never", "always", "instance", "combat" }
-local objUpdating = false
-local objHooked = false
+local objParent             -- the tracker's parent before it was moved
+local objFaded = false      -- made transparent in combat by us
 local objQueued = false
 
 local function Tracker()
@@ -160,33 +194,38 @@ local function QueueAfterCombat()
     end)
 end
 
+local editHooked = false
 ApplyObjectives = function()
     local tracker = Tracker()
-    if not tracker or objUpdating then return end
-    objUpdating = true
-    if HideObjectives() then
-        tracker:SetAlpha(0)
-        if InCombatLockdown() then
-            QueueAfterCombat()
-        elseif tracker:IsShown() then
-            tracker.tfHidden = true
-            tracker:Hide()
+    if not tracker then return end
+    local hide = HideObjectives()
+    local moved = tracker:GetParent() == Style.hiddenParent
+
+    if InCombatLockdown() then
+        if hide and not moved and not objFaded then
+            objFaded = true
+            tracker:SetAlpha(0)
+        elseif not hide and objFaded then
+            objFaded = false
+            tracker:SetAlpha(1)
         end
+        if hide ~= moved then QueueAfterCombat() end
     else
-        tracker:SetAlpha(1)
-        if tracker.tfHidden and not InCombatLockdown() then
-            tracker.tfHidden = nil
-            tracker:Show()
-        elseif tracker.tfHidden then
-            QueueAfterCombat()
+        if hide and not moved then
+            objParent = tracker:GetParent() or UIParent
+            tracker:SetParent(Style.hiddenParent)
+        elseif not hide and moved then
+            tracker:SetParent(objParent or UIParent)
+            objParent = nil
+        end
+        if objFaded then
+            objFaded = false
+            tracker:SetAlpha(1)
         end
     end
-    objUpdating = false
-    if objHooked then return end
-    objHooked = true
-    -- Blizzard shows it again whenever quests change.
-    hooksecurefunc(tracker, "Show", function() if HideObjectives() then ApplyObjectives() end end)
-    hooksecurefunc(tracker, "SetAlpha", function() if HideObjectives() then ApplyObjectives() end end)
+
+    if editHooked then return end
+    editHooked = true
     local em = _G.EditModeManagerFrame
     if em then
         em:HookScript("OnShow", ApplyObjectives)
@@ -196,6 +235,7 @@ end
 
 -- Wiring ---------------------------------------------------------------------
 
+--- Apply every hiding setting (player frame, bar art, action tooltips, quest tracker).
 function TF:ApplyHiding()
     ApplyPlayerFrame()
     ApplyBarArt()
@@ -223,7 +263,13 @@ TF:AddCommand("quests", function(arg)
     TF.db.hideObjectives = arg
     ApplyObjectives()
     TF:Print("quest tracker: " .. MODE_NAMES[arg] .. ".")
-end, "[never|always|dungeons|combat] - when to hide the quest tracker")
+end, "[never|always|dungeons|combat] - when to hide the quest tracker", { group = "Hiding", details = {
+    "never - always show it",
+    "always - always hide it (it still shows in Edit Mode)",
+    "dungeons - hide it in dungeons and raids",
+    "combat - hide it during fights",
+    "(no argument) - step to the next mode",
+} })
 
 local function Toggle(key, label)
     TF.db[key] = not TF.db[key]
@@ -232,8 +278,8 @@ local function Toggle(key, label)
 end
 
 TF:AddCommand("frame", function() Toggle("hidePlayerFrame", "hide player frame") end,
-    "- toggle hiding the player frame")
+    "- toggle hiding the player frame", { group = "Hiding" })
 TF:AddCommand("tooltips", function() Toggle("hideActionTooltips", "hide action bar tooltips") end,
-    "- toggle hiding action bar tooltips")
+    "- toggle hiding action bar tooltips", { group = "Hiding" })
 TF:AddCommand("shift", function() Toggle("shiftShowsTooltips", "Shift shows tooltips") end,
-    "- toggle showing tooltips while Shift is held")
+    "- toggle showing action bar tooltips while Shift is held", { group = "Hiding" })

@@ -71,7 +71,7 @@ local roster = {
 }
 local rosterDirty = true
 
--- "Name-Realm" for someone from another realm, "Name" otherwise; nil when unreadable.
+--- "Name-Realm" for someone from another realm, "Name" otherwise; nil when unreadable.
 local function FullName(unit)
     local name, realm = API.Safe(UnitName, unit)
     name = API.PlainString(name)
@@ -80,6 +80,8 @@ local function FullName(unit)
     return realm and (name .. "-" .. realm) or name
 end
 
+----- Cache every group unit (players first, then pets) with its last readable
+----- name, class and role.
 local function RebuildRoster()
     local units, byName, info = roster.units, roster.byName, roster.info
     wipe(units)
@@ -98,8 +100,7 @@ local function RebuildRoster()
         if isMe ~= nil then e.me = isMe end
         e.role = API.UnitRole(unit)
         -- Another real tank (by role and a tanking class) isn't a loose mob.
-        e.otherTank = not e.me and e.role == "TANK" and (e.class == "WARRIOR" or e.class == "DRUID"
-            or e.class == "PALADIN") or false
+        e.otherTank = not e.me and e.role == "TANK" and ns.Kits[e.class or ""] ~= nil or false
         local key = FullName(unit)
         -- Players are added first, so a pet sharing a player's name never wins.
         if key and not byName[key] then byName[key] = unit end
@@ -116,11 +117,26 @@ local function RebuildRoster()
     rosterDirty = false
 end
 
+local GROUP_UNIT = { player = true, pet = true }
+for i = 1, 4 do GROUP_UNIT["party" .. i] = true GROUP_UNIT["partypet" .. i] = true end
+for i = 1, 40 do GROUP_UNIT["raid" .. i] = true GROUP_UNIT["raidpet" .. i] = true end
+
+--- True for a group unit token (player, pet, partyN, partypetN, raidN, raidpetN),
+--- false for nameplates, target and the rest. nil (some events omit the unit) counts.
+---@param unit string|nil
+---@return boolean
+function Threat.IsGroupUnit(unit)
+    if unit == nil then return true end
+    return GROUP_UNIT[unit] == true
+end
+
 local function Roster()
     if rosterDirty then RebuildRoster() end
     return roster
 end
 
+--- Every group unit token, players first, then pets.
+---@return string[]
 function Threat.GroupUnits() return Roster().units end
 
 -- Target threat list ---------------------------------------------------------------
@@ -129,6 +145,8 @@ local list, pool = {}, {}
 
 local function ByScaled(a, b) return a.scaled > b.scaled end
 
+----- Fill `list` with each group member's scaled threat on `mob`, highest first.
+----- Returns true when the client hid some of it.
 local function Collect(mob)
     for i = #list, 1, -1 do
         pool[#pool + 1] = list[i]
@@ -156,6 +174,30 @@ local function Collect(mob)
     return restricted
 end
 
+--- The header status for a threat list: "holding", "next N%" (colored by how
+--- close), "NOT ON YOU", "hidden" when the client hides it all, or "".
+---@param entries {scaled: number, me: boolean?, tanking: boolean}[] highest threat first
+---@param hasTarget boolean
+---@param restricted boolean some threat values were secret
+---@return string
+function Threat.StatusFor(entries, hasTarget, restricted)
+    if not hasTarget then return "" end
+    if restricted and #entries == 0 then return "|cff" .. HEX.muted .. "hidden|r" end
+    -- Am I holding it, and how close is the next person?
+    local mine, nextUp
+    for _, e in ipairs(entries) do
+        if e.me then mine = e elseif not nextUp then nextUp = e end
+    end
+    if mine and mine.tanking then
+        if not nextUp then return "|cff" .. HEX.good .. "holding|r" end
+        local col = nextUp.scaled >= 90 and HEX.bad or (nextUp.scaled >= 70 and HEX.warn or HEX.good)
+        return string.format("|cff%snext %d%%|r", col, nextUp.scaled)
+    end
+    if #entries > 0 then return "|cff" .. HEX.bad .. "NOT ON YOU|r" end
+    return ""
+end
+
+--- Redraw the threat list and footer.
 function Threat:Update()
     local rows = math.min(TF.db.threat.rows or 5, MAX_ROWS)
     local hasTarget = API.UnitExists("target") and API.UnitCanAttack("player", "target")
@@ -178,27 +220,7 @@ function Threat:Update()
         for i = #list, 1, -1 do pool[#pool + 1] = list[i] list[i] = nil end
     end
 
-    -- Status: am I holding it, and how close is the next person?
-    local mine, nextUp
-    for _, e in ipairs(list) do
-        if e.me then mine = e elseif not nextUp then nextUp = e end
-    end
-    if not hasTarget then
-        SetText(f.status, "")
-    elseif restricted and #list == 0 then
-        SetText(f.status, "|cff" .. HEX.muted .. "hidden|r")
-    elseif mine and mine.tanking then
-        if nextUp then
-            local col = nextUp.scaled >= 90 and HEX.bad or (nextUp.scaled >= 70 and HEX.warn or HEX.good)
-            SetText(f.status, string.format("|cff%snext %d%%|r", col, nextUp.scaled))
-        else
-            SetText(f.status, "|cff" .. HEX.good .. "holding|r")
-        end
-    elseif #list > 0 then
-        SetText(f.status, "|cff" .. HEX.bad .. "NOT ON YOU|r")
-    else
-        SetText(f.status, "")
-    end
+    SetText(f.status, Threat.StatusFor(list, hasTarget, restricted))
 
     local shown = 0
     for i = 1, math.min(#list, rows) do
@@ -234,21 +256,26 @@ function Threat:Update()
         f.footer:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -(y + 1))
         y = y + 15
     end
-    f:SetHeight(y + PAD - 2)
-    Style.FitAnchor("threat")
+    -- Resize (and refit the mover) only when the row count or footer changed.
+    if f.lastHeight ~= y then
+        f.lastHeight = y
+        f:SetHeight(y + PAD - 2)
+        Style.FitAnchor("threat")
+    end
 end
 
 -- Mobs on other group members ----------------------------------------------------
 
 local plates = {}   -- [unit token] = true; only used by the debug log's probe
 
+--- Enemy nameplates seen; for the debug log's probe.
 function Threat.PlateCount()
     local n = 0
     for _ in pairs(plates) do n = n + 1 end
     return n
 end
 
--- For the debug log's probe.
+--- For the debug log's probe.
 function Threat.FirstPlate()
     for unit in pairs(plates) do
         if API.UnitExists(unit) and API.UnitCanAttack("player", unit) then return unit end
@@ -257,13 +284,33 @@ function Threat.FirstPlate()
 end
 
 local aggro = {}     -- [unit] = true while that member has a mob on them
+local clearSince = {} -- [unit] = when that member last stopped having a mob on them, this fight
 Threat.victims = {} -- names of members with a mob on them right now
 
-local function Scan()
+--- Seconds a member must have been clear before a mob on them counts as another loss.
+--- A caster or a mob that flips target picks someone up and drops them again every
+--- second or two; that is one loss, not several.
+Threat.RECOUNT = 3
+
+--- Whether a member picking up a mob counts as a new loss for the pull.
+---@param since number|nil when they last stopped having a mob on them (nil: not this fight)
+---@param now number
+---@return boolean
+function Threat.CountsAsNewLoss(since, now)
+    return since == nil or now - since >= Threat.RECOUNT
+end
+
+--- Count group members with a mob on them (threat status 2 or 3), skipping you,
+--- pets and other real tanks. A member newly attacked fires LOOSE, and counts
+--- toward the pull's aggroLost unless they were clear for less than
+--- Threat.RECOUNT seconds (Threat.CountsAsNewLoss); a change in the count or in whether your
+--- healer is attacked fires LOOSE_COUNT. Runs every TICK in combat.
+function Threat.Scan()
     local healerUnit = ns.Healer and ns.Healer.unit
     local loose, onHealer = 0, false
     wipe(Threat.victims)
     if Tank.isTank and TF.inCombat and IsInGroup() then
+        local now = API.Now()
         local r = Roster()
         for _, unit in ipairs(r.units) do
             local info = r.info[unit]
@@ -276,19 +323,23 @@ local function Scan()
                     Threat.victims[#Threat.victims + 1] = info.name
                     if unit == healerUnit then onHealer = true end
                     if not aggro[unit] then
-                        if Tank.pull then
+                        local counted = Threat.CountsAsNewLoss(clearSince[unit], now)
+                        if counted and Tank.pull then
                             Tank.pull.aggroLost = Tank.pull.aggroLost + 1
                             local to = Tank.pull.aggroLostTo
                             to[info.name] = (to[info.name] or 0) + 1
                         end
-                        TF:Fire("LOOSE", nil, info.name, unit == healerUnit, false, unit)
+                        TF:Fire("LOOSE", nil, info.name, unit == healerUnit, false, unit, counted)
                     end
+                elseif aggro[unit] then
+                    clearSince[unit] = now
                 end
                 aggro[unit] = has or nil
             end
         end
     else
         wipe(aggro)
+        wipe(clearSince)
     end
     local changed = loose ~= Threat.looseCount or onHealer ~= Threat.healerAttacked
     Threat.looseCount, Threat.healerAttacked = loose, onHealer
@@ -308,7 +359,7 @@ ticker:SetScript("OnUpdate", function(_, dt)
     elapsed = 0
     if not TF.db then return end
     if TF.inCombat then
-        local ok, err = pcall(Scan)
+        local ok, err = pcall(Threat.Scan)
         if not ok then TF:Error(err) end
     end
     if f:IsShown() and (dirty or TF.inCombat) then
@@ -321,6 +372,8 @@ local function SyncTicker()
     ticker:SetShown((TF.inCombat or f:IsShown()) and true or false)
 end
 
+--- Show or hide the panel: enabled, a tanking kit, and either unlocked or
+--- tanking with a target or in combat.
 function Threat:Refresh()
     local hasTarget = API.UnitExists("target") and API.UnitCanAttack("player", "target")
     local show = TF.db.threat.enabled and Tank.kit ~= nil
@@ -341,9 +394,14 @@ TF:RegisterEvent("NAME_PLATE_UNIT_REMOVED", function(_, unit) if unit then plate
 for _, ev in ipairs({ "UNIT_THREAT_LIST_UPDATE", "UNIT_THREAT_SITUATION_UPDATE" }) do
     TF:RegisterEvent(ev, function() dirty = true end)
 end
-for _, ev in ipairs({ "GROUP_ROSTER_UPDATE", "UNIT_PET", "UNIT_NAME_UPDATE", "PLAYER_ENTERING_WORLD",
-    "PLAYER_ROLES_ASSIGNED" }) do
+for _, ev in ipairs({ "GROUP_ROSTER_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_ROLES_ASSIGNED" }) do
     TF:RegisterEvent(ev, function() rosterDirty = true dirty = true end)
+end
+-- These fire for every nameplate too; only a group member's change touches the roster.
+for _, ev in ipairs({ "UNIT_PET", "UNIT_NAME_UPDATE" }) do
+    TF:RegisterEvent(ev, function(_, unit)
+        if Threat.IsGroupUnit(unit) then rosterDirty = true dirty = true end
+    end)
 end
 TF:RegisterEvent("PLAYER_TARGET_CHANGED", function() Threat:Refresh() end)
 TF:RegisterEvent("GROUP_ROSTER_UPDATE", function() Threat:Refresh() end)
@@ -354,6 +412,7 @@ TF:On("LOADED", function() f:SetScale(TF.db.scale or 1) end)
 TF:On("COMBAT", function(inCombat)
     if not inCombat then
         wipe(aggro)
+        wipe(clearSince)
         wipe(Threat.victims)
         Threat.looseCount, Threat.healerAttacked = 0, false
     end
