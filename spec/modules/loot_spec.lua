@@ -29,14 +29,21 @@ describe("Loot.ShouldHide", function()
 end)
 
 describe("Loot roll windows", function()
-    local A, container
+    local A, container, roll
     local function load(db)
         A = addon.load({ db = db, setup = function(w)
             container = w.NewFrame("Frame", "GroupLootContainer", _G.UIParent)
+            -- On the client the roll frames are anchored to the container, not parented to it.
+            roll = w.NewFrame("Frame", "GroupLootFrame1", _G.UIParent)
             _G.GetLootRollItemLink = function(id) return "[Item " .. id .. "]" end
         end })
     end
-    local function hidden() return container:GetParent() == A.ns.Style.hiddenParent end
+    local function hidden()
+        local h = A.ns.Style.hiddenParent
+        local c, r = container:GetParent() == h, roll:GetParent() == h
+        assert.equal(c, r, "container and roll frame should move together")
+        return c
+    end
     after_each(function()
         _G.GetLootRollItemLink = nil
         wow.uninstall()
@@ -50,6 +57,18 @@ describe("Loot roll windows", function()
         assert.matches("loot roll waiting until combat ends: %[Item 7%]", wow.chatText())
         A.combat(false)
         assert.equal(_G.UIParent, container:GetParent())
+        assert.equal(_G.UIParent, roll:GetParent())
+    end)
+
+    it("hides roll frames that only the container lists, and restores them", function()
+        load()
+        local pooled = wow.NewFrame("Frame", nil, _G.UIParent)
+        container.rollFrames = { pooled }
+        A.combat(true)
+        assert.equal(A.ns.Style.hiddenParent, pooled:GetParent())
+        container.rollFrames = {} -- answered while hidden: still has to go back
+        A.combat(false)
+        assert.equal(_G.UIParent, pooled:GetParent())
     end)
 
     it("shows a roll early when it's about to run out", function()

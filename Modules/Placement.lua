@@ -11,6 +11,9 @@
 --
 -- NPC windows (quest, gossip, vendor, trainer, flight, bank) open at a box
 -- you place with /tf unlock instead of Blizzard's top-left panel slot.
+--
+-- Micro-button alerts ("You have unspent Talent points") are kept on screen:
+-- with the micro menu at the screen edge they'd otherwise hang half off it.
 local _, ns = ...
 local TF = ns.TF
 
@@ -248,3 +251,45 @@ TF:RegisterEvent("ADDON_LOADED", function() if TF.db then HookDialogs() end end)
 function TF:ApplyNpcDialogs()
     Placement.PlaceDialogs()
 end
+
+-- Micro-button alerts -------------------------------------------------------
+--
+-- Blizzard centers its micro-button alerts above the button and doesn't clamp
+-- them, so with the micro menu along the left edge half the pop-up is off
+-- screen. Clamping them slides them back on. Clamping is a widget setting:
+-- nothing is written to Blizzard's Lua fields and none of these are protected.
+
+--- Named alert frames from clients that use them rather than HelpTip.
+Placement.ALERT_FRAMES = {
+    "TalentMicroButtonAlert", "CollectionsMicroButtonAlert", "LFDMicroButtonAlert", "EJMicroButtonAlert",
+    "CharacterMicroButtonAlert", "GuildMicroButtonAlert", "StoreMicroButtonAlert",
+}
+
+local function Clamp(frame)
+    if frame and type(frame.SetClampedToScreen) == "function" then pcall(frame.SetClampedToScreen, frame, true) end
+end
+
+--- Clamp every shown HelpTip and every named micro-button alert to the screen.
+function Placement.ClampAlerts()
+    if not Enabled() then return end
+    for _, name in ipairs(Placement.ALERT_FRAMES) do Clamp(_G[name]) end
+    local pool = type(_G.HelpTip) == "table" and _G.HelpTip.framePool
+    if type(pool) ~= "table" or type(pool.EnumerateActive) ~= "function" then return end
+    local ok, iter, state, start = pcall(pool.EnumerateActive, pool)
+    if not ok or type(iter) ~= "function" then return end
+    -- Pools enumerate as frame -> true (or index -> frame); clamp whichever is the frame.
+    for k, v in iter, state, start do
+        Clamp(type(k) == "table" and k or v)
+    end
+end
+
+if type(_G.MainMenuMicroButton_ShowAlert) == "function" then
+    hooksecurefunc("MainMenuMicroButton_ShowAlert", function(alert)
+        Clamp(Enabled() and type(alert) == "table" and alert or nil)
+        Placement.ClampAlerts()
+    end)
+end
+if type(_G.HelpTip) == "table" and type(_G.HelpTip.Show) == "function" then
+    hooksecurefunc(_G.HelpTip, "Show", function() Placement.ClampAlerts() end)
+end
+TF:On("LOGIN", function() Placement.ClampAlerts() end)

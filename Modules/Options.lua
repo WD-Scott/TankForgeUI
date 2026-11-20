@@ -13,6 +13,7 @@ local C = Style.colors
 ns.Options = ns.Options or {}
 local Options = ns.Options
 Options.sections = Options.sections or {}   -- section records by id, for reflow and specs
+Options.choices = Options.choices or {}     -- choice button groups by setting path ("alerts.lapseWhere")
 
 local WIDTH = 600
 local COL_W = 270
@@ -49,6 +50,29 @@ function Options.SetCollapsed(db, id, collapsed)
     db.options = db.options or {}
     db.options.collapsed = db.options.collapsed or {}
     db.options.collapsed[id] = collapsed and true or false
+end
+
+-- Layout ----------------------------------------------------------------------
+
+--- Lay buttons of the given widths out left to right, starting a new row when
+--- the next one wouldn't fit in maxWidth. A button wider than maxWidth gets a row
+--- of its own.
+---@param widths number[]
+---@param maxWidth number
+---@param gap number space between buttons and between rows
+---@param rowH number height of one row
+---@return {x: number, y: number}[] positions offsets from the top left (y is 0 or negative)
+---@return number height total height of all rows
+function Options.FlowButtons(widths, maxWidth, gap, rowH)
+    local out, x, y = {}, 0, 0
+    for i, w in ipairs(widths) do
+        if x > 0 and x + w > maxWidth then
+            x, y = 0, y - rowH - gap
+        end
+        out[i] = { x = x, y = y }
+        x = x + w + gap
+    end
+    return out, (#widths > 0) and (-y + rowH) or 0
 end
 
 -- Settings access -------------------------------------------------------------
@@ -262,16 +286,18 @@ local function Column(x, y0, width)
         fs:SetPoint("TOPLEFT", 0, self.cur.cy - 4)
         fs:SetText(label)
         self.cur.cy = self.cur.cy - ROW
-        local gap = 4
-        local bw = math.floor((self.width - gap * (#choices - 1)) / #choices)
-        local group = {}
-        for i, ch in ipairs(choices) do
-            local b = Button(c, ch[2], bw, 22, function()
+        local gap, rowH = 4, 22
+        local group, widths = {}, {}
+        for _, ch in ipairs(choices) do
+            local b = Button(c, ch[2], 56, rowH, function()
                 Set(path, ch[1])
                 ApplyAll()
                 for _, other in ipairs(group) do other:Refresh() end
             end)
-            b:SetPoint("TOPLEFT", (i - 1) * (bw + gap), self.cur.cy)
+            -- Sized to its label, so long labels don't run into their neighbours.
+            local bw = math.max(56, math.ceil(b.label:GetStringWidth() + 20))
+            b:SetWidth(bw)
+            widths[#widths + 1] = bw
             b.value, b.title, b.note = ch[1], label, note
             b.Refresh = function(btn)
                 btn.selected = Get(path) == btn.value
@@ -286,7 +312,12 @@ local function Column(x, y0, width)
             group[#group + 1] = b
             controls[#controls + 1] = b
         end
-        self.cur.cy = self.cur.cy - 28
+        local spots, height = Options.FlowButtons(widths, self.width, gap, rowH)
+        for i, b in ipairs(group) do
+            b:SetPoint("TOPLEFT", spots[i].x, self.cur.cy + spots[i].y)
+        end
+        Options.choices[table.concat(path, ".")] = group
+        self.cur.cy = self.cur.cy - height - 6
     end
 
     -- path: a setting path, or { get = fn, set = fn }.
@@ -366,8 +397,8 @@ local function BuildAppearance()
     appCol = Column(LEFT_X, 0, WIDTH - 2 * LEFT_X)
     local s = appCol:Section("Appearance", "Appearance")
     local c = s.content
-    local SLIDER_W = 150
-    local IN_X, OUT_X = 150, 380   -- relative to the content frame (anchored at LEFT_X)
+    local SLIDER_W = 140
+    local IN_X, OUT_X = 130, 345   -- relative to the content frame (anchored at LEFT_X)
     local y = -4
 
     local scaleLabel = Style.Text(c, 12)
@@ -412,6 +443,8 @@ end
 -- lives in its own frame so the reflow only has to move it.
 local function BuildFooter()
     footer = CreateFrame("Frame", nil, win)
+    Options.footer = footer
+    footer.buttons = {}
     local fullW = WIDTH - 2 * LEFT_X
     footer:SetWidth(fullW)
     local y = 0
@@ -448,9 +481,12 @@ local function BuildFooter()
     for i, spec in ipairs(buttons) do
         local b = Button(footer, spec[1], bw, 28, spec[2])
         b:SetPoint("TOPLEFT", (i - 1) * (bw + gap), y)
+        footer.buttons[spec[1]] = b
     end
     y = y - 28
     footer.h = -y
+    -- Width and height both: a frame without a height has no size, and WoW draws none of its children.
+    footer:SetSize(fullW, footer.h)
 end
 
 local function Build()

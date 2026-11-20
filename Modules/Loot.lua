@@ -1,10 +1,12 @@
 -- Modules/Loot.lua
 -- Holds Blizzard's Need / Greed / Pass roll windows back until combat ends.
 --
--- The roll windows live in GroupLootContainer. In combat it's reparented to
--- the hidden frame and goes back to its own parent when combat ends. The roll
--- frames aren't secure, so this works in combat too, and nothing else on them
--- is touched (no Show/Hide/SetAlpha calls, hooks or field writes).
+-- The roll windows (GroupLootFrame1..N) are laid out by GroupLootContainer but
+-- on this client are only anchored to it, not parented. Hiding the container
+-- alone left them drawn but dead to clicks, so in combat the container and each
+-- roll frame are reparented to the hidden frame and go back to their own parents
+-- when combat ends. None of them are secure, so this works in combat too, and
+-- nothing else on them is touched (no Show/Hide/SetAlpha calls, hooks or field writes).
 --
 -- The server's roll timer keeps running while the window is hidden, and an
 -- unanswered roll passes when it runs out. A roll with less than
@@ -48,14 +50,24 @@ end
 
 -- Frames ---------------------------------------------------------------------
 
---- Blizzard's roll windows: the container, or the single frames on clients without one.
+--- Blizzard's roll windows: the container (when there is one) and every roll frame,
+--- named or listed in the container's rollFrames, each once.
 ---@return table[]
 function Loot.Frames()
-    if _G.GroupLootContainer then return { _G.GroupLootContainer } end
-    local list = {}
-    for i = 1, MAX_FRAMES do
-        local f = _G["GroupLootFrame" .. i]
-        if f then list[#list + 1] = f end
+    local list, seen = {}, {}
+    local function add(f)
+        if type(f) == "table" and f.SetParent and not seen[f] then
+            seen[f] = true
+            list[#list + 1] = f
+        end
+    end
+    local container = _G.GroupLootContainer
+    add(container)
+    local count = math.max(MAX_FRAMES, tonumber(_G.NUM_GROUP_LOOT_FRAMES) or 0)
+    for i = 1, count do add(_G["GroupLootFrame" .. i]) end
+    local rolls = container and container.rollFrames
+    if type(rolls) == "table" then
+        for _, f in pairs(rolls) do add(f) end
     end
     return list
 end
@@ -64,16 +76,24 @@ local homes = {} -- frame -> its parent before it was hidden
 local ticker
 
 local function SetHidden(hide)
-    for _, frame in ipairs(Loot.Frames()) do
-        if hide and not homes[frame] then
-            homes[frame] = frame:GetParent() or UIParent
-            pcall(frame.SetParent, frame, Style.hiddenParent)
-        elseif not hide and homes[frame] then
-            pcall(frame.SetParent, frame, homes[frame])
+    if not hide then
+        -- Walk what was moved, not the current list: a frame can leave rollFrames while hidden.
+        for frame, home in pairs(homes) do
+            pcall(frame.SetParent, frame, home)
             homes[frame] = nil
         end
+        Loot.hidden = false
+        return
     end
-    Loot.hidden = hide
+    for _, frame in ipairs(Loot.Frames()) do
+        if not homes[frame] then
+            homes[frame] = frame:GetParent() or UIParent
+            pcall(frame.SetParent, frame, Style.hiddenParent)
+            TF:Log("LOOT", "hide %s (from %s)", tostring(frame:GetName() or frame),
+                tostring(homes[frame].GetName and homes[frame]:GetName() or homes[frame]))
+        end
+    end
+    Loot.hidden = true
 end
 
 local function Update()

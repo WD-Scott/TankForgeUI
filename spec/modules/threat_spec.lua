@@ -262,6 +262,17 @@ describe("Threat", function()
             assert.is_nil(f.rows[3])
         end)
 
+        it("ends the title where the status starts, so they can't overlap", function()
+            load()
+            local f = Threat.frame
+            local found
+            for i = 1, f.title:GetNumPoints() do
+                local point, rel, relPoint = f.title:GetPoint(i)
+                if point == "RIGHT" then found = rel == f.status and relPoint == "LEFT" end
+            end
+            assert.is_true(found)
+        end)
+
         it("is hidden when not tanking, or turned off", function()
             load({ form = false })
             w.units.target = { name = "Kobold", hostile = true }

@@ -114,8 +114,13 @@ function Frame:GetPoint(i)
     return unpack(p)
 end
 
+function Frame:SetClampedToScreen(v) S(self).clamped = v and true or false end
+function Frame:IsClampedToScreen() return S(self).clamped or false end
+
 function Frame:SetText(t) S(self).text = t end
 function Frame:GetText() return S(self).text end
+-- Rough measure of a FontString's text: about 7px per character.
+function Frame:GetStringWidth() return #(S(self).text or "") * 7 end
 function Frame:SetFormattedText(fmt, ...)
     local args = { ... }
     for i = 1, select("#", ...) do
