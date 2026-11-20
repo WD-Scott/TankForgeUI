@@ -92,3 +92,56 @@ describe("Placement NPC windows", function()
         assert.are.same({ "CENTER", _G.UIParent, "CENTER", 120, 40 }, { point, rel, relPoint, x, y })
     end)
 end)
+
+describe("Placement micro-button alerts", function()
+    local tip, talent, active
+    local function load(db, opts)
+        opts = opts or {}
+        addon.load({ db = db, setup = function(w)
+            tip = w.NewFrame("Frame", nil, _G.UIParent)
+            active = {}
+            talent = w.NewFrame("Frame", "TalentMicroButtonAlert", _G.UIParent)
+            _G.MainMenuMicroButton_ShowAlert = function() end
+            if not opts.noHelpTip then
+                _G.HelpTip = {
+                    Show = function() end,
+                    framePool = { EnumerateActive = function() return pairs(active) end },
+                }
+            end
+        end })
+    end
+    after_each(function()
+        _G.HelpTip, _G.MainMenuMicroButton_ShowAlert = nil, nil
+        wow.uninstall()
+    end)
+
+    it("clamps named alerts at login", function()
+        load()
+        assert.is_true(talent:IsClampedToScreen())
+    end)
+
+    it("clamps active help tips when an alert shows", function()
+        load()
+        assert.is_false(tip:IsClampedToScreen())
+        active[tip] = true
+        _G.MainMenuMicroButton_ShowAlert(talent, "You have unspent Talent points.")
+        assert.is_true(tip:IsClampedToScreen())
+        _G.HelpTip:Show(_G.UIParent, {})
+        assert.is_true(tip:IsClampedToScreen())
+    end)
+
+    it("leaves alerts alone with keepClear off", function()
+        load({ keepClear = false })
+        active[tip] = true
+        _G.MainMenuMicroButton_ShowAlert(talent, "x")
+        _G.HelpTip:Show(_G.UIParent, {})
+        assert.is_false(talent:IsClampedToScreen())
+        assert.is_false(tip:IsClampedToScreen())
+    end)
+
+    it("works without HelpTip", function()
+        load(nil, { noHelpTip = true })
+        _G.MainMenuMicroButton_ShowAlert(talent, "x")
+        assert.is_true(talent:IsClampedToScreen())
+    end)
+end)

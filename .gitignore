@@ -22,6 +22,9 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 
+# Local dev/preview UI (not shipped, not committed)
+/dev/
+
 # Build / release output
 *.zip
 luac.out

@@ -6,6 +6,7 @@ ignore:
   - scripts
   - spec
   - annotations
+  - dev
   - .github
   - CLAUDE.md
   - CLAUDE.local.md

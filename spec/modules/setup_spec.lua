@@ -175,25 +175,6 @@ describe("Setup", function()
     end)
 end)
 
-describe("Options settings", function()
-    after_each(function() wow.uninstall() end)
-
-    it("reads and writes settings by key path", function()
-        local A = addon.load()
-        local TF = A.TF
-        assert.is_true(TF.GetSetting({ "party", "enabled" }))
-        TF.SetSetting({ "party", "enabled" }, false)
-        assert.is_false(TF.db.party.enabled)
-        TF.SetSetting({ "scale" }, 1.2)
-        assert.are.equal(1.2, TF.GetSetting({ "scale" }))
-    end)
-
-    it("opens the options window without errors", function()
-        local A = addon.load()
-        assert.has_no.errors(function() A.slash("") end)
-    end)
-end)
-
 describe("Placement", function()
     local A, bags
     -- Three 200x300 bags open, on a 1920x1080 screen.

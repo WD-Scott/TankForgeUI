@@ -1,21 +1,79 @@
 -- Modules/Options.lua
 -- The /tf window. Everything in it is drawn in TankForgeUI's own style: flat
 -- buttons, square checkboxes and sliders, on a solid dark window with amber
--- section headings. Two columns of switches, then Appearance (scale, opacity,
--- range dimming), then a footer with the debug log and the action buttons.
+-- section headings. The sections are a collapsible accordion: each heading is a
+-- clickable header with a chevron that folds its rows away and remembers the
+-- choice. Two columns of switches, then a full-width Appearance section, then a
+-- footer (always shown) with the debug log and the action buttons.
 local _, ns = ...
 local TF = ns.TF
 local Style = ns.Style
 local C = Style.colors
 
+ns.Options = ns.Options or {}
+local Options = ns.Options
+Options.sections = Options.sections or {}   -- section records by id, for reflow and specs
+Options.choices = Options.choices or {}     -- choice button groups by setting path ("alerts.lapseWhere")
+
 local WIDTH = 600
 local COL_W = 270
 local LEFT_X, RIGHT_X = 20, 316
 local ROW = 22
+local HEADER_H = 20
+local SECTION_GAP = 12
+local BOTTOM_MARGIN = 16
 local CHECK_MARK = "Interface\\Buttons\\UI-CheckBox-Check"
+local ARROW = "Interface\\ChatFrame\\ChatFrameExpandArrow"
 
 local win
 local controls = {}   -- everything with a :Refresh(), re-read when the window opens
+local Lcol, Rcol, appCol, footer
+local Relayout        -- assigned in Build; referenced by section headers
+
+-- Collapse state --------------------------------------------------------------
+
+--- Whether the /tf section `id` is folded away. Sections absent from the saved
+--- table read as expanded.
+---@param db TankForgeUISettings
+---@param id string
+---@return boolean
+function Options.IsCollapsed(db, id)
+    local o = db and db.options
+    return not not (o and o.collapsed and o.collapsed[id])
+end
+
+--- Fold or unfold the /tf section `id`, writing it to the saved settings.
+---@param db TankForgeUISettings
+---@param id string
+---@param collapsed boolean
+function Options.SetCollapsed(db, id, collapsed)
+    db.options = db.options or {}
+    db.options.collapsed = db.options.collapsed or {}
+    db.options.collapsed[id] = collapsed and true or false
+end
+
+-- Layout ----------------------------------------------------------------------
+
+--- Lay buttons of the given widths out left to right, starting a new row when
+--- the next one wouldn't fit in maxWidth. A button wider than maxWidth gets a row
+--- of its own.
+---@param widths number[]
+---@param maxWidth number
+---@param gap number space between buttons and between rows
+---@param rowH number height of one row
+---@return {x: number, y: number}[] positions offsets from the top left (y is 0 or negative)
+---@return number height total height of all rows
+function Options.FlowButtons(widths, maxWidth, gap, rowH)
+    local out, x, y = {}, 0, 0
+    for i, w in ipairs(widths) do
+        if x > 0 and x + w > maxWidth then
+            x, y = 0, y - rowH - gap
+        end
+        out[i] = { x = x, y = y }
+        x = x + w + gap
+    end
+    return out, (#widths > 0) and (-y + rowH) or 0
+end
 
 -- Settings access -------------------------------------------------------------
 
@@ -174,43 +232,73 @@ end
 
 local function Percent(v) return string.format("%d%%", v * 100 + 0.5) end
 
--- A section heading with an amber underline. Returns the y below it.
-local function Heading(parent, text, x, y, width)
-    local fs = Style.Text(parent, 13)
-    fs:SetPoint("TOPLEFT", x, y)
-    fs:SetText(text)
-    fs:SetTextColor(unpack(C.accent))
-    local line = Flat(parent, "ARTWORK", { C.accent[1], C.accent[2], C.accent[3], 0.45 })
-    line:SetPoint("TOPLEFT", x, y - 18)
-    line:SetSize(width or COL_W, 1)
-    return y - 26
+-- A clickable section header: a chevron that turns, an amber title and an amber
+-- underline. The whole row toggles the section. :SetCollapsed turns the chevron.
+local function SectionHeader(parent, title, width)
+    local h = CreateFrame("Button", nil, parent)
+    h:SetSize(width, HEADER_H)
+    h.arrow = h:CreateTexture(nil, "ARTWORK")
+    h.arrow:SetTexture(ARROW)
+    h.arrow:SetSize(10, 10)
+    h.arrow:SetPoint("LEFT", 0, -1)
+    h.arrow:SetVertexColor(C.accent[1], C.accent[2], C.accent[3])
+    h.label = Style.Text(h, 13)
+    h.label:SetPoint("LEFT", h.arrow, "RIGHT", 6, 1)
+    h.label:SetText(title)
+    h.label:SetTextColor(unpack(C.accent))
+    local line = Flat(h, "ARTWORK", { C.accent[1], C.accent[2], C.accent[3], 0.45 })
+    line:SetPoint("BOTTOMLEFT", 0, 0)
+    line:SetSize(width, 1)
+
+    -- The chevron points down when the section is open, right when it's folded.
+    function h:SetCollapsed(collapsed)
+        self.arrow:SetRotation(collapsed and 0 or -math.pi / 2)
+    end
+    h:SetScript("OnEnter", function(self) self.label:SetTextColor(1, 1, 1) end)
+    h:SetScript("OnLeave", function(self) self.label:SetTextColor(unpack(C.accent)) end)
+    return h
 end
 
--- A column that stacks headings and checkboxes downwards.
-local function Column(x, y)
-    local col = { x = x, y = y }
-    function col:Section(title)
-        if self.started then self.y = self.y - 12 end
-        self.started = true
-        self.y = Heading(win, title, self.x, self.y)
+-- A column of collapsible sections. Each section owns a content frame; its rows
+-- are parented into it and laid out with a cursor from 0 downwards, so folding
+-- it is one SetShown and the reflow only moves the header and the content.
+local function Column(x, y0, width)
+    local col = { x = x, y0 = y0, width = width or COL_W, sections = {}, cur = nil }
+
+    function col:Section(id, title)
+        local content = CreateFrame("Frame", nil, win)
+        content:SetWidth(self.width)
+        local s = { id = id, header = SectionHeader(win, title, self.width), content = content, cy = 0 }
+        self.cur = s
+        self.sections[#self.sections + 1] = s
+        Options.sections[id] = s
+        s.header:SetScript("OnClick", function()
+            Options.SetCollapsed(TF.db, id, not Options.IsCollapsed(TF.db, id))
+            Relayout()
+        end)
+        return s
     end
+
     -- A label and a row of buttons, one per choice; the chosen one is lit amber.
     function col:Choice(label, path, choices, note)
-        local fs = Style.Text(win, 12)
-        fs:SetPoint("TOPLEFT", self.x, self.y - 4)
+        local c = self.cur.content
+        local fs = Style.Text(c, 12)
+        fs:SetPoint("TOPLEFT", 0, self.cur.cy - 4)
         fs:SetText(label)
-        self.y = self.y - ROW
-        local gap = 4
-        local bw = math.floor((COL_W - gap * (#choices - 1)) / #choices)
-        local group = {}
-        for i, c in ipairs(choices) do
-            local b = Button(win, c[2], bw, 22, function()
-                Set(path, c[1])
+        self.cur.cy = self.cur.cy - ROW
+        local gap, rowH = 4, 22
+        local group, widths = {}, {}
+        for _, ch in ipairs(choices) do
+            local b = Button(c, ch[2], 56, rowH, function()
+                Set(path, ch[1])
                 ApplyAll()
                 for _, other in ipairs(group) do other:Refresh() end
             end)
-            b:SetPoint("TOPLEFT", self.x + (i - 1) * (bw + gap), self.y)
-            b.value, b.title, b.note = c[1], label, note
+            -- Sized to its label, so long labels don't run into their neighbours.
+            local bw = math.max(56, math.ceil(b.label:GetStringWidth() + 20))
+            b:SetWidth(bw)
+            widths[#widths + 1] = bw
+            b.value, b.title, b.note = ch[1], label, note
             b.Refresh = function(btn)
                 btn.selected = Get(path) == btn.value
                 local tint = btn.selected and C.accent or C.muted
@@ -224,7 +312,12 @@ local function Column(x, y)
             group[#group + 1] = b
             controls[#controls + 1] = b
         end
-        self.y = self.y - 28
+        local spots, height = Options.FlowButtons(widths, self.width, gap, rowH)
+        for i, b in ipairs(group) do
+            b:SetPoint("TOPLEFT", spots[i].x, self.cur.cy + spots[i].y)
+        end
+        Options.choices[table.concat(path, ".")] = group
+        self.cur.cy = self.cur.cy - height - 6
     end
 
     -- path: a setting path, or { get = fn, set = fn }.
@@ -246,9 +339,18 @@ local function Column(x, y)
                 if opts.onChange then opts.onChange(v) end
             end
         end
-        Checkbox(win, label, self.x + indent, self.y, get, set, note, (opts.width or COL_W) - indent)
-        self.y = self.y - ROW
+        Checkbox(self.cur.content, label, indent, self.cur.cy, get, set, note, (opts.width or self.width) - indent)
+        self.cur.cy = self.cur.cy - ROW
     end
+
+    -- An indented action button on its own row (e.g. "Open runs").
+    function col:ActionButton(label, w, onClick)
+        local b = Button(self.cur.content, label, w, 22, onClick)
+        b:SetPoint("TOPLEFT", 22, self.cur.cy - 2)
+        self.cur.cy = self.cur.cy - 30
+        return b
+    end
+
     return col
 end
 
@@ -264,6 +366,127 @@ local function ApplyScale(v)
         anchor.target:SetScale(v)
         Style.FitAnchor(anchor.key)
     end
+end
+
+-- Stack a column's sections from `top`, folding the collapsed ones away, and
+-- return the y below the last one.
+local function LayoutColumn(col, top)
+    local y = top
+    for _, s in ipairs(col.sections) do
+        s.header:ClearAllPoints()
+        s.header:SetPoint("TOPLEFT", col.x, y)
+        s.header:SetCollapsed(Options.IsCollapsed(TF.db, s.id))
+        y = y - HEADER_H
+        local h = math.max(1, -s.cy)
+        s.content:SetSize(col.width, h)
+        s.content:ClearAllPoints()
+        s.content:SetPoint("TOPLEFT", col.x, y)
+        if Options.IsCollapsed(TF.db, s.id) then
+            s.content:Hide()
+        else
+            s.content:Show()
+            y = y - h
+        end
+        y = y - SECTION_GAP
+    end
+    return y
+end
+
+-- Appearance (scale and opacity sliders, range dimming). Full width.
+local function BuildAppearance()
+    appCol = Column(LEFT_X, 0, WIDTH - 2 * LEFT_X)
+    local s = appCol:Section("Appearance", "Appearance")
+    local c = s.content
+    local SLIDER_W = 140
+    local IN_X, OUT_X = 130, 345   -- relative to the content frame (anchored at LEFT_X)
+    local y = -4
+
+    local scaleLabel = Style.Text(c, 12)
+    scaleLabel:SetPoint("TOPLEFT", 4, y - 3)
+    scaleLabel:SetText("Frame scale")
+    Slider(c, IN_X, y - 2, SLIDER_W, 0.6, 1.6, 0.05,
+        function() return TF.db.scale or 1 end, ApplyScale, Percent)
+    y = y - 30
+
+    local inHead = Style.Text(c, 11)
+    inHead:SetPoint("TOPLEFT", IN_X, y)
+    inHead:SetText("Opacity in combat")
+    inHead:SetTextColor(unpack(C.muted))
+    local outHead = Style.Text(c, 11)
+    outHead:SetPoint("TOPLEFT", OUT_X, y)
+    outHead:SetText("Out of combat")
+    outHead:SetTextColor(unpack(C.muted))
+    y = y - 20
+    for _, row in ipairs({ { "hud", "Tank HUD" }, { "healer", "Healer panel" }, { "party", "Party frames" } }) do
+        local key = row[1]
+        local label = Style.Text(c, 12)
+        label:SetPoint("TOPLEFT", 4, y - 3)
+        label:SetText(row[2])
+        for _, spec in ipairs({ { "alpha", IN_X }, { "oocAlpha", OUT_X } }) do
+            local field = spec[1]
+            Slider(c, spec[2], y - 2, SLIDER_W, 0.1, 1, 0.05,
+                function() return TF.db[key][field] or 1 end,
+                function(v)
+                    TF.db[key][field] = v
+                    ApplyAll()
+                end, Percent)
+        end
+        y = y - 28
+    end
+    y = y - 4
+    appCol.cur.cy = y
+    appCol:Check("Dim the healer panel when your healer is out of range", { "healer", "dimOutOfRange" })
+    appCol:Check("Dim party members who are out of range", { "party", "dimOutOfRange" })
+end
+
+-- Footer: a divider, the debug log, a hint and the action buttons. Always shown;
+-- lives in its own frame so the reflow only has to move it.
+local function BuildFooter()
+    footer = CreateFrame("Frame", nil, win)
+    Options.footer = footer
+    footer.buttons = {}
+    local fullW = WIDTH - 2 * LEFT_X
+    footer:SetWidth(fullW)
+    local y = 0
+
+    local divider = Flat(footer, "ARTWORK", { 1, 1, 1, 0.08 })
+    divider:SetPoint("TOPLEFT", 0, y)
+    divider:SetSize(fullW, 1)
+    y = y - 10
+    footer.log = Checkbox(footer, "Debug log  |cff" .. Style.HEX.muted .. "(saved on /reload or logout; /tf log for more)|r",
+        0, y,
+        function() return ns.Log and ns.Log:IsOn() end,
+        function(v) ns.Log:SetEnabled(v) end,
+        "Records what happens in your runs to a file you can share. See /tf log.", fullW)
+    y = y - ROW - 2
+    local hint = Style.Text(footer, 11)
+    hint:SetPoint("TOPLEFT", 0, y)
+    hint:SetTextColor(unpack(C.muted))
+    hint:SetText("/tf help lists every command.  /tf healer makes your target the healer.")
+    y = y - 26
+
+    local buttons = {
+        { "Set up layout", function() win:Hide() TF:RunSetup() end },
+        { "Move frames", function()
+            -- Out of the way while moving; Done brings it back.
+            win:Hide()
+            Style.SetUnlocked(true, { onLock = function() TF:OpenOptions() end })
+        end },
+        { "Reset positions", function() Style.ResetPositions() end },
+        { "Last pull", function() ns.Report:Open(1) end },
+        { "Test alert", function() TF.commands.test.fn("") end },
+    }
+    local gap = 8
+    local bw = math.floor((fullW - gap * (#buttons - 1)) / #buttons)
+    for i, spec in ipairs(buttons) do
+        local b = Button(footer, spec[1], bw, 28, spec[2])
+        b:SetPoint("TOPLEFT", (i - 1) * (bw + gap), y)
+        footer.buttons[spec[1]] = b
+    end
+    y = y - 28
+    footer.h = -y
+    -- Width and height both: a frame without a height has no size, and WoW draws none of its children.
+    footer:SetSize(fullW, footer.h)
 end
 
 local function Build()
@@ -293,178 +516,112 @@ local function Build()
     close:SetFrameLevel(titleBar:GetFrameLevel() + 5)
     win.close = close
 
-    local top = -50
-
     -- Left column
-    local L = Column(LEFT_X, top)
-    L:Section("Hide")
-    L:Check("Player frame", { "hidePlayerFrame" },
+    Lcol = Column(LEFT_X, 0)
+    Lcol:Section("Hide", "Hide")
+    Lcol:Check("Player frame", { "hidePlayerFrame" },
         "Hides your portrait, health and power bars. Other addons' HUDs on it stay visible.")
-    L:Check("Action bar tooltips", { "hideActionTooltips" })
-    L:Check("...but show them while Shift is held", { "shiftShowsTooltips" }, nil, { indent = true })
-    L:Check("Action bar end caps and border", { "hideBarArt" })
-    L:Choice("Quest tracker", { "hideObjectives" }, {
+    Lcol:Check("Action bar tooltips", { "hideActionTooltips" })
+    Lcol:Check("...but show them while Shift is held", { "shiftShowsTooltips" }, nil, { indent = true })
+    Lcol:Check("Action bar end caps and border", { "hideBarArt" })
+    Lcol:Choice("Quest tracker", { "hideObjectives" }, {
         { "never", "Never" }, { "always", "Always" }, { "instance", "Dungeons" }, { "combat", "Combat" },
     }, "When to hide the \"All Objectives\" quest tracker. It always shows in Edit Mode so you can move it.")
-    L:Check("Keep tooltips and bags off the action bars", { "keepClear" },
+    Lcol:Check("Keep tooltips and bags off the action bars", { "keepClear" },
         "Tooltips and bags open above your action bars instead of on top of them.")
-    L:Check("Move NPC windows", { "npcDialogs", "enabled" },
+    Lcol:Check("Move NPC windows", { "npcDialogs", "enabled" },
         "Quest, gossip, vendor, trainer, flight and bank windows open at the \"NPC dialogs\" box "
         .. "instead of the top left. Move the box with /tf unlock.",
         { onChange = function() if TF.ApplyNpcDialogs then TF:ApplyNpcDialogs() end end })
-    L:Check("Loot rolls wait until after combat", { "loot", "delay" },
+    Lcol:Check("Loot rolls wait until after combat", { "loot", "delay" },
         "Need / Greed / Pass windows stay hidden in combat and appear when it ends. "
         .. "A roll about to run out (10 seconds left) shows anyway, so it isn't passed for you.",
         { onChange = function() if TF.ApplyLoot then TF:ApplyLoot() end end })
-    L:Section("Alerts")
-    L:Check("Alerts on", { "alerts", "enabled" })
-    L:Check("Sounds", { "alerts", "sound" }, nil, { indent = true })
-    L:Check("A mob is on your healer", { "alerts", "healerAttacked" }, nil, { indent = true })
-    L:Check("A mob is on someone else", { "alerts", "lostAggro" }, nil, { indent = true })
-    L:Check("Being hit with Shield Block down", { "alerts", "mitigationLapse" },
+
+    Lcol:Section("Alerts", "Alerts")
+    Lcol:Check("Alerts on", { "alerts", "enabled" })
+    Lcol:Check("Sounds", { "alerts", "sound" }, nil, { indent = true })
+    Lcol:Check("A mob is on your healer", { "alerts", "healerAttacked" }, nil, { indent = true })
+    Lcol:Check("A mob is on someone else", { "alerts", "lostAggro" }, nil, { indent = true })
+    Lcol:Check("Being hit with Shield Block down", { "alerts", "mitigationLapse" },
         "Your main mitigation (Shield Block, Demoralizing Roar or Holy Shield) is down while you're being hit, "
         .. "and you could cast it: off cooldown, in the right stance or form, with a shield if it needs one.",
         { indent = true })
-    L:Choice("...where", { "alerts", "lapseWhere" }, {
+    Lcol:Choice("...where", { "alerts", "lapseWhere" }, {
         { "always", "Everywhere" }, { "group", "Groups & dungeons" }, { "instance", "Dungeons only" },
     }, "Solo in the open world it's mostly noise, so by default it only fires in a group or a dungeon.")
-    L:Check("What was ready when you died", { "alerts", "death" }, nil, { indent = true })
-    L:Check("A big defensive came back", { "alerts", "defensiveReady" }, nil, { indent = true })
+    Lcol:Check("What was ready when you died", { "alerts", "death" }, nil, { indent = true })
+    Lcol:Check("A big defensive came back", { "alerts", "defensiveReady" }, nil, { indent = true })
 
     -- Right column
-    local R = Column(RIGHT_X, top)
-    R:Section("Frames")
-    R:Check("Tank HUD", { "hud", "enabled" }, nil,
+    Rcol = Column(RIGHT_X, 0)
+    Rcol:Section("Frames", "Frames")
+    Rcol:Check("Tank HUD", { "hud", "enabled" }, nil,
         { onChange = function() if TF.ApplyStances then TF:ApplyStances() end end })
-    R:Check("...show your portrait", { "hud", "portrait" },
+    Rcol:Check("...show your portrait", { "hud", "portrait" },
         "Your portrait on the left of the HUD's health and power bars, since the player frame is hidden.",
         { indent = true, onChange = function() if ns.HUD then ns.HUD:Build() end end })
-    R:Check("...stance buttons", { "stances", "enabled" },
+    Rcol:Check("...stance buttons", { "stances", "enabled" },
         "Your stance or form buttons in a flyout on the HUD's right edge, in place of Blizzard's stance bar. "
         .. "The tab opens and closes it, and both work in combat.",
         { indent = true, onChange = function() if TF.ApplyStances then TF:ApplyStances() end end })
-    R:Check("...stay up, compact, when not tanking", { "hud", "showIdle" },
+    Rcol:Check("...stay up, compact, when not tanking", { "hud", "showIdle" },
         "Keeps your portrait, bars and stance buttons up while you're not tanking, "
         .. "so you can click back into your tanking stance.",
         { indent = true, onChange = function() if ns.HUD then ns.HUD:Refresh() end end })
-    R:Check("Threat and loose mobs", { "threat", "enabled" })
-    R:Check("Healer panel", { "healer", "enabled" })
-    R:Check("Party frames  |cff" .. Style.HEX.muted .. "(needs /reload)|r", { "party", "enabled" },
+    Rcol:Check("Threat and loose mobs", { "threat", "enabled" })
+    Rcol:Check("Healer panel", { "healer", "enabled" })
+    Rcol:Check("Party frames  |cff" .. Style.HEX.muted .. "(needs /reload)|r", { "party", "enabled" },
         "Minimal party frames with portraits. Blizzard's party frames are hidden while these are on.",
         { onChange = function() TF:Print("party frame changes take effect after a /reload.") end })
-    R:Check("...leave out your healer", { "party", "hideHealer" },
+    Rcol:Check("...leave out your healer", { "party", "hideHealer" },
         "Your healer already has their own panel, so they're left off the party frames. "
         .. "Only applies while the healer panel is on.", { indent = true })
-    R:Check("Professions button on minimap", { "professions", "enabled" },
+    Rcol:Check("Professions button on minimap", { "professions", "enabled" },
         "A button on the edge of the minimap that lists your profession spells. Drag it to move it around the edge.",
         { onChange = function() if TF.ApplyProfessions then TF:ApplyProfessions() end end })
-    R:Section("Pull report")
-    R:Check("Record pulls", { "report", "enabled" })
-    R:Check("Open after each pull", { "report", "autoShow" }, nil, { indent = true })
-    R:Check("Also outside dungeons and raids", { "report", "openWorld" }, nil, { indent = true })
-    R:Check("Charts", { "report", "charts" },
+
+    Rcol:Section("Pull report", "Pull report")
+    Rcol:Check("Record pulls", { "report", "enabled" })
+    Rcol:Check("Open after each pull", { "report", "autoShow" }, nil, { indent = true })
+    Rcol:Check("Also outside dungeons and raids", { "report", "openWorld" }, nil, { indent = true })
+    Rcol:Check("Charts", { "report", "charts" },
         "A timeline of the pull (when you were hit with and without your mitigation) and your coverage over recent pulls.",
         { indent = true, onChange = function()
             if ns.Report.frame:IsShown() then ns.Report:Render(ns.Report.shownIndex or 1) end
         end })
-    R:Section("Runs")
-    R:Check("Record dungeon and raid runs", { "runs", "enabled" },
+
+    Rcol:Section("Runs", "Runs")
+    Rcol:Check("Record dungeon and raid runs", { "runs", "enabled" },
         "Keeps every pull of a dungeon or raid run together, so you can look back at a whole run and compare runs. "
         .. "A run ends when you go into another instance, after 15 minutes outside, or with /tf run end.",
         { onChange = function() if ns.Runs then ns.Runs:Check() end end })
-    R:Check("Show a summary when a run ends", { "runs", "toast" }, nil, { indent = true })
-    local runsButton = Style.Button(win, "Open runs", 120, 22, function() win:Hide() ns.Runs:Open() end)
-    runsButton:SetPoint("TOPLEFT", R.x + 22, R.y - 2)
-    R.y = R.y - 30
-    R:Section("Tanking")
-    R:Check("Always treat me as the tank", { "tankMode" },
+    Rcol:Check("Show a summary when a run ends", { "runs", "toast" }, nil, { indent = true })
+    Rcol:ActionButton("Open runs", 120, function() win:Hide() ns.Runs:Open() end)
+
+    Rcol:Section("Tanking", "Tanking")
+    Rcol:Check("Always treat me as the tank", { "tankMode" },
         "Normally TankForgeUI turns on when you're in Defensive Stance, Bear Form or Righteous Fury, "
         .. "or the group made you the tank.", { invert = true })
 
-    -- Appearance, full width
-    local y = math.min(L.y, R.y) - 12
-    y = Heading(win, "Appearance", LEFT_X, y, WIDTH - 2 * LEFT_X)
-    local SLIDER_W = 150
-    local IN_X, OUT_X = 170, 400
+    BuildAppearance()
+    BuildFooter()
+    win.log = footer.log
 
-    local scaleLabel = Style.Text(win, 12)
-    scaleLabel:SetPoint("TOPLEFT", LEFT_X + 4, y - 3)
-    scaleLabel:SetText("Frame scale")
-    Slider(win, IN_X, y - 2, SLIDER_W, 0.6, 1.6, 0.05,
-        function() return TF.db.scale or 1 end, ApplyScale, Percent)
-    y = y - 30
+    Relayout()
+end
 
-    local inHead = Style.Text(win, 11)
-    inHead:SetPoint("TOPLEFT", IN_X, y)
-    inHead:SetText("Opacity in combat")
-    inHead:SetTextColor(unpack(C.muted))
-    local outHead = Style.Text(win, 11)
-    outHead:SetPoint("TOPLEFT", OUT_X, y)
-    outHead:SetText("Out of combat")
-    outHead:SetTextColor(unpack(C.muted))
-    y = y - 20
-    for _, row in ipairs({ { "hud", "Tank HUD" }, { "healer", "Healer panel" }, { "party", "Party frames" } }) do
-        local key = row[1]
-        local label = Style.Text(win, 12)
-        label:SetPoint("TOPLEFT", LEFT_X + 4, y - 3)
-        label:SetText(row[2])
-        for _, spec in ipairs({ { "alpha", IN_X }, { "oocAlpha", OUT_X } }) do
-            local field = spec[1]
-            Slider(win, spec[2], y - 2, SLIDER_W, 0.1, 1, 0.05,
-                function() return TF.db[key][field] or 1 end,
-                function(v)
-                    TF.db[key][field] = v
-                    ApplyAll()
-                end, Percent)
-        end
-        y = y - 28
-    end
-    y = y - 4
-    local A = Column(LEFT_X, y)
-    A.started = true
-    A:Check("Dim the healer panel when your healer is out of range", { "healer", "dimOutOfRange" }, nil,
-        { width = WIDTH - 2 * LEFT_X })
-    A:Check("Dim party members who are out of range", { "party", "dimOutOfRange" })
-    y = A.y
-
-    -- Footer: a divider, the debug log, a hint, then the buttons.
-    y = y - 12
-    local divider = Flat(win, "ARTWORK", { 1, 1, 1, 0.08 })
-    divider:SetPoint("TOPLEFT", LEFT_X, y)
-    divider:SetSize(WIDTH - 2 * LEFT_X, 1)
-    y = y - 10
-    local log = Checkbox(win, "Debug log  |cff" .. Style.HEX.muted .. "(saved on /reload or logout; /tf log for more)|r",
-        LEFT_X, y,
-        function() return ns.Log and ns.Log:IsOn() end,
-        function(v) ns.Log:SetEnabled(v) end,
-        "Records what happens in your runs to a file you can share. See /tf log.", WIDTH - 2 * LEFT_X)
-    y = y - ROW - 2
-    local hint = Style.Text(win, 11)
-    hint:SetPoint("TOPLEFT", LEFT_X, y)
-    hint:SetTextColor(unpack(C.muted))
-    hint:SetText("/tf help lists every command.  /tf healer makes your target the healer.")
-    y = y - 26
-
-    local buttons = {
-        { "Set up layout", function() win:Hide() TF:RunSetup() end },
-        { "Move frames", function()
-            -- Out of the way while moving; Done brings it back.
-            win:Hide()
-            Style.SetUnlocked(true, { onLock = function() TF:OpenOptions() end })
-        end },
-        { "Reset positions", function() Style.ResetPositions() end },
-        { "Last pull", function() ns.Report:Open(1) end },
-        { "Test alert", function() TF.commands.test.fn("") end },
-    }
-    local gap = 8
-    local bw = math.floor((WIDTH - 2 * LEFT_X - gap * (#buttons - 1)) / #buttons)
-    for i, spec in ipairs(buttons) do
-        local b = Button(win, spec[1], bw, 28, spec[2])
-        b:SetPoint("TOPLEFT", LEFT_X + (i - 1) * (bw + gap), y)
-    end
-    y = y - 28 - 16
-    win:SetSize(WIDTH, -y)
-    win.log = log
+-- Position every header, fold the collapsed sections, and size the window.
+Relayout = function()
+    if not win then return end
+    local top = -50
+    local lb = LayoutColumn(Lcol, top)
+    local rb = LayoutColumn(Rcol, top)
+    local ab = LayoutColumn(appCol, math.min(lb, rb))
+    local footerTop = ab - 4
+    footer:ClearAllPoints()
+    footer:SetPoint("TOPLEFT", LEFT_X, footerTop)
+    win:SetSize(WIDTH, -footerTop + footer.h + BOTTOM_MARGIN)
 end
 
 --- Open the /tf options window, re-reading every control.

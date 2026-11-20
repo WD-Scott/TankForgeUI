@@ -38,13 +38,15 @@ f:SetSize(WIDTH, 60)
 f:Hide()
 Threat.frame = f
 
-f.title = Style.Text(f, 12)
-f.title:SetPoint("TOPLEFT", PAD, -PAD - 2)
-f.title:SetPoint("RIGHT", f, "RIGHT", -70, 0)
-f.title:SetJustifyH("LEFT")
 f.status = Style.Text(f, 11)
 f.status:SetPoint("TOPRIGHT", -PAD, -PAD - 3)
 f.status:SetJustifyH("RIGHT")
+-- The title ends where the status starts, so a long mob name is cut short
+-- ("...") rather than running into "NOT ON YOU".
+f.title = Style.Text(f, 12)
+f.title:SetPoint("TOPLEFT", PAD, -PAD - 2)
+f.title:SetPoint("RIGHT", f.status, "LEFT", -6, 0)
+f.title:SetJustifyH("LEFT")
 f.footer = Style.Text(f, 11)
 f.footer:SetJustifyH("LEFT")
 f.rows = {}
